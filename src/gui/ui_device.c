@@ -6,6 +6,7 @@
 #include "../config.h"
 #include "../device.h"
 #include "../connection.h"
+#include "../check_host.h"
 //#include "../debug.h"
 #include "../input/vita.h"
 #include "ui_connect.h"
@@ -54,7 +55,7 @@ enum {
   SEARCH_THREAD_REQ_STOP,
 };
 
-int search_thread_status = SEARCH_THREAD_IDLE;
+volatile int search_thread_status = SEARCH_THREAD_IDLE;
 
 static device_info_t devices[64];
 static int DEVICE_ENTRY_IDX[64];
@@ -102,27 +103,36 @@ static void moonlight_found_callback(int idx, const char* host, const char* pcna
     found_device++;
 }
 
+// Started by start_search_thread(), which sets search_thread_status to
+// SEARCH_THREAD_RUNNING first
 int mdns_discovery_main(SceSize args, void *argp) {
   vita_debug_log("[mDNS] Iniciando búsqueda de dispositivos...\n");
-  if (search_thread_status != SEARCH_THREAD_IDLE) {
-    vita_debug_log("[mDNS] search_thread_status != IDLE, saliendo.\n");
-    return 0;
-  }
-
-  search_thread_status = SEARCH_THREAD_RUNNING;
   found_device = 0;
 
-  udp_sniffer_vita_deinit(); // Cierra socket y limpia estado
-  udp_sniffer_vita_init();   // Limpia estado (opcional, por simetría)
-  udp_sniffer_vita_set_callback(moonlight_found_callback);
+  // The sniffer is shared with the host scan (see check_host.c); wait for it
+  // unless the search is stopped first
+  bool locked = false;
+  while (search_thread_status == SEARCH_THREAD_RUNNING && !locked) {
+    locked = mdns_sniffer_lock(100 * MILLISECOND);
+  }
 
-  // Esperar y procesar durante 10 segundos máximo
-  int ticks = 0;
-  int max_ticks = 100; // 100 * 100ms = 10s
-  while (search_thread_status == SEARCH_THREAD_RUNNING && ticks < max_ticks) {
-      udp_sniffer_vita_poll();
-      sceKernelDelayThread(1000 * 100); // 100ms
-      ticks++;
+  if (locked) {
+    udp_sniffer_vita_deinit(); // Cierra socket y limpia estado
+    udp_sniffer_vita_init();   // Limpia estado (opcional, por simetría)
+    udp_sniffer_vita_set_callback(moonlight_found_callback);
+
+    // Esperar y procesar durante 10 segundos máximo
+    int ticks = 0;
+    int max_ticks = 100; // 100 * 100ms = 10s
+    while (search_thread_status == SEARCH_THREAD_RUNNING && ticks < max_ticks) {
+        udp_sniffer_vita_poll();
+        sceKernelDelayThread(1000 * 100); // 100ms
+        ticks++;
+    }
+
+    udp_sniffer_vita_set_callback(NULL);
+    udp_sniffer_vita_deinit(); // No dejar el socket abierto (y en el grupo multicast)
+    mdns_sniffer_unlock();
   }
 
   search_thread_status = SEARCH_THREAD_IDLE;
@@ -132,9 +142,11 @@ int mdns_discovery_main(SceSize args, void *argp) {
 
 static SceUID search_thread_id = -1;
 
+// Stops the search thread and waits for it to end. Also reaps a thread that
+// finished its 10 s by itself, so its thread object isn't leaked.
 void stop_search_thread_if_running() {
   vita_debug_log("[mDNS] stop_search_thread_if_running: status=%d, thid=%d\n", search_thread_status, search_thread_id);
-  if (search_thread_status == SEARCH_THREAD_RUNNING && search_thread_id > 0) {
+  if (search_thread_id >= 0) {
     vita_debug_log("[mDNS] Llamando a end_search_thread(%d)\n", search_thread_id);
     end_search_thread(search_thread_id);
     vita_debug_log("[mDNS] end_search_thread terminado\n");
@@ -149,6 +161,8 @@ static void clear_devices() {
 }
 
 SceUID start_search_thread() {
+  // Never two search threads at once
+  stop_search_thread_if_running();
   vita_debug_log("[mDNS] start_search_thread: limpiando y creando hilo\n");
   clear_devices();
   SceUID thid = sceKernelCreateThread("mdns", mdns_discovery_main, 0x10000100, 0x10000, 0, 0, NULL);
@@ -156,7 +170,13 @@ SceUID start_search_thread() {
     vita_debug_log("[mDNS] Error creando hilo de búsqueda\n");
     return -1;
   }
-  sceKernelStartThread(thid, 0, 0);
+  // Set before it starts, so a stop sent right away isn't lost
+  search_thread_status = SEARCH_THREAD_RUNNING;
+  if (sceKernelStartThread(thid, 0, 0) < 0) {
+    search_thread_status = SEARCH_THREAD_IDLE;
+    sceKernelDeleteThread(thid);
+    return -1;
+  }
   search_thread_id = thid;
   vita_debug_log("[mDNS] Hilo de búsqueda iniciado: thid=%d\n", thid);
   return thid;
@@ -175,6 +195,7 @@ int end_search_thread(SceUID thid) {
   } while (sceKernelWaitThreadEnd(thid, NULL, &timeout) < 0);
 
   sceKernelDeleteThread(thid);
+  search_thread_status = SEARCH_THREAD_IDLE;
   vita_debug_log("[mDNS] Hilo %d eliminado\n", thid);
   return 0;
 }

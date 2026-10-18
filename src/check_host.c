@@ -13,12 +13,51 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <errno.h>
+#include <sys/socket.h>
 #include "debug.h"
 
 #ifdef __vita__
 #include "udp_sniffer_vita.h"
 #include <psp2/kernel/threadmgr.h>
 #define MAX_HOSTS 16
+
+// The mDNS sniffer (third_party/mdnsniff) keeps one static socket, callback
+// and host table, and isn't thread-safe: its poll creates the socket lazily
+// and its deinit closes it. The host scan thread, the Search thread and
+// find_host_ip_mdns() all use it, so each takes this lock around its use.
+// Without it, two threads polling at once could each open a socket (leaking
+// one, still a multicast member), and one thread's deinit closed another's
+// socket mid-poll.
+static SceUID sniffer_mutex = -1;
+
+bool mdns_sniffer_lock(SceUInt timeout_us) {
+    SceUID mutex = __atomic_load_n(&sniffer_mutex, __ATOMIC_ACQUIRE);
+    if (mutex < 0) {
+        // Created on first use; if two threads race here, one keeps its mutex
+        SceUID created = sceKernelCreateMutex("mdns_sniffer", SCE_KERNEL_MUTEX_ATTR_RECURSIVE, 0, NULL);
+        if (created < 0) {
+            vita_debug_log("[mDNS] couldn't create the sniffer lock: 0x%08x", created);
+            return false;
+        }
+        SceUID expected = -1;
+        if (__atomic_compare_exchange_n(&sniffer_mutex, &expected, created, false,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            mutex = created;
+        } else {
+            sceKernelDeleteMutex(created);
+            mutex = expected;
+        }
+    }
+    SceUInt timeout = timeout_us;
+    return sceKernelLockMutex(mutex, 1, &timeout) >= 0;
+}
+
+void mdns_sniffer_unlock(void) {
+    sceKernelUnlockMutex(__atomic_load_n(&sniffer_mutex, __ATOMIC_ACQUIRE), 1);
+}
 
 // Variables estáticas para comunicación con el callback
 static volatile int mdns_found = 0;
@@ -38,6 +77,12 @@ bool find_host_ip_mdns(const char *hostname, char *out_ip, size_t out_len) {
     mdns_found_ip[0] = '\0';
     strncpy(mdns_hostname_ref, hostname, sizeof(mdns_hostname_ref)-1);
     mdns_hostname_ref[sizeof(mdns_hostname_ref)-1] = '\0';
+    // Normally free, since the host scan and Search are stopped by then; if
+    // not, fall back to the other checks rather than hold up the caller
+    if (!mdns_sniffer_lock(2 * 1000 * 1000)) {
+        vita_debug_log("[mDNS] sniffer busy, skipping the mDNS lookup of %s", hostname);
+        return false;
+    }
     udp_sniffer_vita_deinit();
     udp_sniffer_vita_init();
     udp_sniffer_vita_set_callback(mdns_found_cb);
@@ -47,7 +92,9 @@ bool find_host_ip_mdns(const char *hostname, char *out_ip, size_t out_len) {
         sceKernelDelayThread(1000 * 100); // 100ms
         ticks++;
     }
+    udp_sniffer_vita_set_callback(NULL);
     udp_sniffer_vita_deinit();
+    mdns_sniffer_unlock();
     if (mdns_found) {
         strncpy(out_ip, mdns_found_ip, out_len-1);
         out_ip[out_len-1] = '\0';
@@ -58,9 +105,8 @@ bool find_host_ip_mdns(const char *hostname, char *out_ip, size_t out_len) {
 
 volatile int g_host_scan_thread_status = 0;
 struct host_status g_host_status[MAX_HOSTS];
-#define MAX_SCAN_THREADS 8
-static SceUID host_scan_thread_ids[MAX_SCAN_THREADS] = {-1};
-static int host_scan_thread_count = 0;
+// The one host scan thread, until stop_host_scan_thread() has seen it end
+static SceUID host_scan_thread_id = -1;
 
 // Declaración anticipada para evitar warning/errores
 static bool ping_host(const char *ip, uint16_t port);
@@ -88,14 +134,29 @@ static void scan_mdns_found_cb(int idx, const char* host, const char* pcname, co
 
 volatile int g_host_status_changed = 0;
 
+// Checked between every step, so stopping the scan doesn't wait for a whole pass
+#define SCAN_RUNNING() (g_host_scan_thread_status == 1)
+
+// Takes the sniffer lock for the scan, giving up if the scan is stopped meanwhile
+static bool scan_lock_sniffer(void) {
+    while (SCAN_RUNNING()) {
+        if (mdns_sniffer_lock(100 * 1000)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static int host_scan_thread(SceSize args, void *argp) {
-    g_host_scan_thread_status = 1;
     int ticks = 0;
     vita_debug_log("[SCAN] Hilo de escaneo iniciado\n");
-    udp_sniffer_vita_deinit();
-    udp_sniffer_vita_init();
-    while (g_host_scan_thread_status == 1 && ticks < 1000) { // 100s máx
-        for (int i = 0; i < known_devices.count && i < MAX_HOSTS; i++) {
+    if (scan_lock_sniffer()) {
+        udp_sniffer_vita_deinit();
+        udp_sniffer_vita_init();
+        mdns_sniffer_unlock();
+    }
+    while (SCAN_RUNNING() && ticks < 1000) { // 100s máx
+        for (int i = 0; i < known_devices.count && i < MAX_HOSTS && SCAN_RUNNING(); i++) {
             device_info_t *info = &known_devices.devices[i];
             if (!info->paired) {
                 if (g_host_status[i].status != HOST_OFFLINE) {
@@ -111,14 +172,21 @@ static int host_scan_thread(SceSize args, void *argp) {
             scan_mdns_found_ip[0] = '\0';
             strncpy(scan_mdns_hostname_ref, info->name, sizeof(scan_mdns_hostname_ref)-1);
             scan_mdns_hostname_ref[sizeof(scan_mdns_hostname_ref)-1] = '\0';
+            if (!scan_lock_sniffer()) {
+                break;
+            }
             udp_sniffer_vita_set_callback(scan_mdns_found_cb);
             int mdns_ticks = 0;
-            while (!scan_mdns_found && mdns_ticks < 10) { // 1s máx
+            while (!scan_mdns_found && mdns_ticks < 10 && SCAN_RUNNING()) { // 1s máx
                 udp_sniffer_vita_poll();
                 sceKernelDelayThread(1000 * 100); // 100ms
                 mdns_ticks++;
             }
             udp_sniffer_vita_set_callback(NULL);
+            mdns_sniffer_unlock();
+            if (!SCAN_RUNNING()) {
+                break;
+            }
             if (scan_mdns_found) {
                 vita_debug_log("[SCAN] Host %s encontrado por mDNS: IP=%s\n", info->name, scan_mdns_found_ip);
                 if (strcmp(scan_mdns_found_ip, info->internal) == 0) {
@@ -149,11 +217,13 @@ static int host_scan_thread(SceSize args, void *argp) {
                         pending_ip_update[sizeof(pending_ip_update)-1] = '\0';
                         // Detener el hilo de escaneo y sniffer al detectar cambio de IP
                         vita_debug_log("[SCAN] Cambio de IP detectado, deteniendo hilo de escaneo y sniffer\n");
-                        g_host_scan_thread_status = 0;
-                        udp_sniffer_vita_deinit();
-                        return 0; // Salir del hilo inmediatamente
+                        g_host_scan_thread_status = 0; // Salir del hilo inmediatamente
+                        break;
                     }
                 }
+            }
+            if (!SCAN_RUNNING()) {
+                break;
             }
             if (ping_host(info->internal, info->port)) {
                 if (g_host_status[i].status != HOST_ONLINE) {
@@ -173,44 +243,69 @@ static int host_scan_thread(SceSize args, void *argp) {
             strncpy(g_host_status[i].current_ip, info->internal, sizeof(g_host_status[i].current_ip)-1);
             g_host_status[i].current_ip[sizeof(g_host_status[i].current_ip)-1] = '\0';
         }
-        sceKernelDelayThread(1000 * 500); // 500ms
+        for (int wait = 0; wait < 5 && SCAN_RUNNING(); wait++) {
+            sceKernelDelayThread(1000 * 100); // 500ms
+        }
         ticks++;
     }
-    udp_sniffer_vita_deinit();
+    // The sniffer may be someone else's by now; then they close it
+    if (mdns_sniffer_lock(2 * 1000 * 1000)) {
+        udp_sniffer_vita_deinit();
+        mdns_sniffer_unlock();
+    }
     vita_debug_log("[SCAN] Hilo de escaneo detenido\n");
     g_host_scan_thread_status = 0;
     return 0;
 }
 
 void start_host_scan_thread() {
-    if (g_host_scan_thread_status == 1) return;
+    if (g_host_scan_thread_status == 1 && host_scan_thread_id >= 0) return;
+    // Reaps a scan that ended by itself, or waits for one still stopping, so
+    // there's never more than one
+    stop_host_scan_thread();
+    if (host_scan_thread_id >= 0) {
+        vita_debug_log("[SCAN] El hilo anterior sigue activo, no se creará otro\n");
+        return;
+    }
     for (int i = 0; i < MAX_HOSTS; i++) {
         g_host_status[i].status = HOST_OFFLINE;
         g_host_status[i].current_ip[0] = '\0';
     }
-    if (host_scan_thread_count >= MAX_SCAN_THREADS) {
-        vita_debug_log("[SCAN] Demasiados hilos de escaneo activos, no se creará otro\n");
+    SceUID tid = sceKernelCreateThread("hostscan", host_scan_thread, 0x10000100, 0x10000, 0, 0, NULL);
+    if (tid < 0) {
+        vita_debug_log("[SCAN] Error creando hilo de escaneo: 0x%08x\n", tid);
         return;
     }
-    SceUID tid = sceKernelCreateThread("hostscan", host_scan_thread, 0x10000100, 0x10000, 0, 0, NULL);
-    if (tid >= 0) {
-        sceKernelStartThread(tid, 0, 0);
-        host_scan_thread_ids[host_scan_thread_count++] = tid;
+    // Set before it starts, so the thread can't miss a stop sent right away
+    g_host_scan_thread_status = 1;
+    if (sceKernelStartThread(tid, 0, 0) < 0) {
+        g_host_scan_thread_status = 0;
+        sceKernelDeleteThread(tid);
+        return;
     }
+    host_scan_thread_id = tid;
 }
 
 void stop_host_scan_thread() {
-    for (int i = 0; i < host_scan_thread_count; i++) {
-        SceUID tid = host_scan_thread_ids[i];
-        if (tid > 0) {
-            g_host_scan_thread_status = 2;
-            SceUInt timeout = 100 * 1000; // 100ms
-            sceKernelWaitThreadEnd(tid, NULL, &timeout);
+    SceUID tid = host_scan_thread_id;
+    if (tid < 0) return;
+    if (g_host_scan_thread_status == 1) {
+        g_host_scan_thread_status = 2;
+    }
+    // The thread checks for the stop every 100 ms, and a ping takes at most
+    // a second, so this normally returns well within the limit
+    for (int waited = 0; waited < 50; waited++) {
+        SceUInt timeout = 100 * 1000; // 100ms
+        if (sceKernelWaitThreadEnd(tid, NULL, &timeout) >= 0) {
             sceKernelDeleteThread(tid);
-            host_scan_thread_ids[i] = -1;
+            host_scan_thread_id = -1;
+            g_host_scan_thread_status = 0;
+            return;
         }
     }
-    host_scan_thread_count = 0;}
+    // Kept, so start_host_scan_thread() doesn't start a second one beside it
+    vita_debug_log("[SCAN] El hilo de escaneo no terminó en 5 s\n");
+}
 #endif
 
 // El struct host_status y los defines ya están en check_host.h, no se redeclaran aquí
@@ -226,12 +321,28 @@ static bool ping_host(const char *ip, uint16_t port) {
         close(sock);
         return false;
     }
-    struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv);
-    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof tv);
-    int res = connect(sock, (struct sockaddr*)&addr, sizeof(addr));
+    // SO_SNDTIMEO may not bound connect(), so connect without blocking and
+    // wait up to a second, as moonlight-common-c's connectTcpSocket() does
+#ifdef SO_NONBLOCK
+    int nonblock = 1;
+    setsockopt(sock, SOL_SOCKET, SO_NONBLOCK, (const char*)&nonblock, sizeof nonblock);
+#else
+    fcntl(sock, F_SETFL, fcntl(sock, F_GETFL) | O_NONBLOCK);
+#endif
+    bool connected = false;
+    if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
+        connected = true;
+    } else if (errno == EINPROGRESS || errno == EWOULDBLOCK || errno == EAGAIN) {
+        struct pollfd pfd = { .fd = sock, .events = POLLOUT };
+        if (poll(&pfd, 1, 1000) > 0) {
+            int err = 0;
+            socklen_t len = sizeof(err);
+            connected = getsockopt(sock, SOL_SOCKET, SO_ERROR, (char*)&err, &len) == 0 && err == 0
+                        && !(pfd.revents & POLLERR);
+        }
+    }
     close(sock);
-    return res == 0;
+    return connected;
 }
 
 // Busca la IP actual de un host por nombre (DNS o mDNS)
