@@ -258,15 +258,18 @@ static int vita_pacer_thread_main(SceSize args, void *argp) {
     vitastats_tick();
 
     // The keyframe asked for on resume hasn't come: ask again. Done here, not
-    // when a unit arrives, since a static screen may send none
-    uint64_t now_us = sceKernelGetSystemTimeWide();
-    uint64_t requested_us = __atomic_load_n(&keyframe_request_us, __ATOMIC_RELAXED);
-    if (__atomic_load_n(&keyframe_state, __ATOMIC_ACQUIRE) == KEYFRAME_AWAITED &&
-        now_us - requested_us >= KEYFRAME_RETRY_US) {
-      vita_debug_log("no keyframe %llu ms after resume, requesting another\n",
-                     (now_us - requested_us) / 1000);
-      __atomic_store_n(&keyframe_request_us, now_us, __ATOMIC_RELAXED);
-      LiRequestIdrFrame();
+    // when a unit arrives, since a static screen may send none. Read the
+    // state, then the time it was asked for, then the clock, so the
+    // subtraction can't go negative
+    if (__atomic_load_n(&keyframe_state, __ATOMIC_ACQUIRE) == KEYFRAME_AWAITED) {
+      uint64_t requested_us = __atomic_load_n(&keyframe_request_us, __ATOMIC_RELAXED);
+      uint64_t now_us = sceKernelGetSystemTimeWide();
+      if (now_us - requested_us >= KEYFRAME_RETRY_US) {
+        vita_debug_log("no keyframe %llu ms after resume, requesting another\n",
+                       (now_us - requested_us) / 1000);
+        __atomic_store_n(&keyframe_request_us, now_us, __ATOMIC_RELAXED);
+        LiRequestIdrFrame();
+      }
     }
 
     //last_vblank_count = curr_vblank_count;
@@ -747,16 +750,15 @@ void vitavideo_start() {
   // with a keyframe anyway). Units were dropped while paused and the menu was
   // drawn over the last frame: a keyframe repaints the whole picture at once,
   // even on a static screen where the host would otherwise send nothing.
-  // Stamp the time before decoding restarts, and ask once it has, so the
-  // keyframe can't arrive while units are still being dropped as paused
+  // Drawing is enabled before the state leaves PAUSED (units are still
+  // dropped until then), so the keyframe that ends the wait is always drawn;
+  // and it's asked for only after, so it can't be dropped as paused
   bool resuming = __atomic_load_n(&keyframe_state, __ATOMIC_ACQUIRE) == KEYFRAME_PAUSED;
-  if (resuming) {
-    __atomic_store_n(&keyframe_request_us, sceKernelGetSystemTimeWide(), __ATOMIC_RELAXED);
-    __atomic_store_n(&keyframe_state, KEYFRAME_AWAITED, __ATOMIC_RELEASE);
-  }
   active_video_thread = true;
   vita2d_set_vblank_wait(config.enable_vita_vblank_wait);
   if (resuming) {
+    __atomic_store_n(&keyframe_request_us, sceKernelGetSystemTimeWide(), __ATOMIC_RELAXED);
+    __atomic_store_n(&keyframe_state, KEYFRAME_AWAITED, __ATOMIC_RELEASE);
     LiRequestIdrFrame();
   }
 }
