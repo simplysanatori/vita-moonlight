@@ -120,6 +120,8 @@ target_link_libraries(${PROJECT_NAME}.elf
 	-Wl,--wrap=enet_socket_send
 	# Counts video packets as they arrive (src/netcount.c)
 	-Wl,--wrap=recvUdpSocket
+	# Logs the receive buffer granted to the video socket (src/netcount.c)
+	-Wl,--wrap=bindUdpSocket
 	-lexpat
 	-lcurl
 	moonlight-common-c

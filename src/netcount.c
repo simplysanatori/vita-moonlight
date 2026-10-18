@@ -1,6 +1,8 @@
 #include "netcount.h"
+#include "debug.h"
 
 #include <stdbool.h>
+#include <sys/socket.h>
 
 // Video packets are a full shard: the packet size (1024 bytes or more) plus
 // headers. Only the video socket gets packets this big, and once one has,
@@ -28,6 +30,25 @@ static bool already_seen(uint16_t sequence) {
 
 static void mark_seen(uint16_t sequence) {
   seen[sequence % SEEN_WINDOW] = (uint32_t)sequence + 1;
+}
+
+// Wrapped at link time (-Wl,--wrap=bindUdpSocket): logs the receive buffer
+// the network stack granted, which common-c only logs in debug builds. It
+// asks for room for 2048 video packets and steps down until one is accepted.
+// On a Vita the grant is 512 KB whether the net pool (main.c) is 1 MB or 4 MB.
+int __real_bindUdpSocket(int addressFamily, struct sockaddr_storage *localAddr, socklen_t addrLen,
+                         int bufferSize, int socketQosType);
+int __wrap_bindUdpSocket(int addressFamily, struct sockaddr_storage *localAddr, socklen_t addrLen,
+                         int bufferSize, int socketQosType) {
+  int s = __real_bindUdpSocket(addressFamily, localAddr, addrLen, bufferSize, socketQosType);
+  if (s >= 0 && bufferSize > 0) {
+    int granted = 0;
+    socklen_t len = sizeof(granted);
+    if (getsockopt(s, SOL_SOCKET, SO_RCVBUF, &granted, &len) == 0) {
+      vita_debug_log("[NET] UDP receive buffer: asked %d bytes, granted %d", bufferSize, granted);
+    }
+  }
+  return s;
 }
 
 // Wrapped at link time (-Wl,--wrap=recvUdpSocket), so common-c needs no change
