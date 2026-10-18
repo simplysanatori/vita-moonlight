@@ -118,6 +118,14 @@ static bool active_video_thread = true;
 static bool active_pacer_thread = false;
 static indicator_status poor_net_indicator = {0};
 static bool decode_thread_logged = false;
+// Set by a pause mid-stream (cleared by a new stream's setup): units are
+// dropped undecoded then, so the decoder's reference frames are stale until
+// the next keyframe (IDR)
+static volatile bool need_keyframe = false;
+// When we last asked the host for a keyframe after a pause
+static volatile uint64_t keyframe_request_us = 0;
+// How long to wait for that keyframe before asking common-c for one again
+#define KEYFRAME_RETRY_US 1000000
 // Fixed for a stream at setup, since the textures are created for one format
 static bool decode_yuv = false;
 
@@ -326,6 +334,7 @@ static int vita_setup(int videoFormat, int width, int height, int redrawRate, vo
   int ret;
   printf("vita video setup\n");
   decode_thread_logged = false;
+  need_keyframe = false;
   stream_hint_start_us = 0;
   vitastats_reset();
   decode_yuv = config.decode_yuv;
@@ -496,6 +505,34 @@ static int vita_submit_decode_unit(PDECODE_UNIT decodeUnit) {
     decode_thread_logged = true;
   }
 
+  if (need_keyframe && !active_video_thread) {
+    // Paused: the menu covers the stream, so decoding would only burn power.
+    // DR_OK, so common-c doesn't treat the dropped units as a decoder error
+    // and ask the host for keyframes all through the pause. (Units that come
+    // between setup and the connection starting are still decoded, so the
+    // stream's first keyframe isn't lost.)
+    return DR_OK;
+  }
+
+  if (need_keyframe) {
+    if (decodeUnit->frameType != FRAME_TYPE_IDR) {
+      // P-frames would reference the frames dropped while paused. Keep
+      // dropping until the keyframe vitavideo_start() asked for arrives
+      uint64_t now = LiGetMicroseconds();
+      if (now - keyframe_request_us < KEYFRAME_RETRY_US) {
+        return DR_OK;
+      }
+      // It didn't come: let common-c ask again, and wait for it itself
+      vita_debug_log("no keyframe %llu ms after resume, requesting another\n",
+                     (now - keyframe_request_us) / 1000);
+      keyframe_request_us = now;
+      return DR_NEED_IDR;
+    }
+    vita_debug_log("keyframe %llu ms after resume\n",
+                   (LiGetMicroseconds() - keyframe_request_us) / 1000);
+    need_keyframe = false;
+  }
+
   SceAvcdecAu au = {0};
   SceAvcdecArrayPicture array_picture = {0};
   struct SceAvcdecPicture picture = {0};
@@ -586,8 +623,7 @@ static int vita_submit_decode_unit(PDECODE_UNIT decodeUnit) {
                             image_scaling.region_x2, image_scaling.region_y2);
   }
 
-  //TODO: Seems silly to decode the unit if we're going to drop the frame?
-  // Find out why we decode or if we even need to
+  // Paused while this unit was decoding: don't draw over the menu
   if (active_video_thread) {
     if (need_drop > 0) {
       vita_debug_log("remain frameskip: %d\n", need_drop);
@@ -686,12 +722,26 @@ void draw_indicators() {
 }
 
 void vitavideo_start() {
+  // Resuming from a pause (a new stream's setup clears the flag, and starts
+  // with a keyframe anyway). Units were dropped while paused and the menu was
+  // drawn over the last frame: a keyframe repaints the whole picture at once,
+  // even on a static screen where the host would otherwise send nothing.
+  // Stamp the time before decoding restarts, and ask once it has, so the
+  // keyframe can't arrive while units are still being dropped as paused
+  bool resuming = need_keyframe;
+  if (resuming) {
+    keyframe_request_us = LiGetMicroseconds();
+  }
   active_video_thread = true;
   vita2d_set_vblank_wait(config.enable_vita_vblank_wait);
+  if (resuming) {
+    LiRequestIdrFrame();
+  }
 }
 
 void vitavideo_stop() {
   vita2d_set_vblank_wait(true);
+  need_keyframe = true;
   active_video_thread = false;
 }
 
