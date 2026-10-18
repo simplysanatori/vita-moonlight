@@ -384,8 +384,10 @@ static int vita_setup(int videoFormat, int width, int height, int redrawRate, vo
     for (int i = 0; i < FRAME_TEXTURE_COUNT; i++) {
       // In YUV mode the decoder writes NV21 (a Y plane, then interleaved V/U,
       // so the YVU format: YUV swaps red and blue) and the GPU's texture unit
-      // converts it while sampling. CSC0 is BT.601, which is what we ask the
-      // host to encode; measured against the decoder's own RGBA output.
+      // converts it while sampling. CSC0 is BT.601 limited range, which is
+      // what config_parse() asks the host to encode (stream.colorSpace and
+      // colorRange; change them together); measured against the decoder's
+      // own RGBA output.
       // vita2d sizes unknown formats at 4 bytes per pixel, which is more than
       // the 1.5 that NV21 needs.
       frame_textures[i] = vita2d_create_empty_texture_format(image_scaling.texture_width, image_scaling.texture_height,

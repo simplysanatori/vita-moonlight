@@ -318,6 +318,12 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
   config->stream.streamingRemotely = 0;
   config->stream.audioConfiguration = AUDIO_CONFIGURATION_STEREO;
   config->stream.supportedVideoFormats = VIDEO_FORMAT_H264;
+  // The YUV path samples the decoder's output through a *_CSC0 texture
+  // (src/video/vita.c), and the GPU's CSC0 conversion is BT.601 limited
+  // range. Ask the host for exactly that rather than relying on common-c's
+  // defaults; change these and the texture format together
+  config->stream.colorSpace = COLORSPACE_REC_601;
+  config->stream.colorRange = COLOR_RANGE_LIMITED;
 
   config->platform = "vita";
   config->model = sceKernelGetModelForCDialog();
