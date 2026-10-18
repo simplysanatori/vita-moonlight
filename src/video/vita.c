@@ -118,13 +118,18 @@ static bool active_video_thread = true;
 static bool active_pacer_thread = false;
 static indicator_status poor_net_indicator = {0};
 static bool decode_thread_logged = false;
-// Set by a pause mid-stream (cleared by a new stream's setup): units are
-// dropped undecoded then, so the decoder's reference frames are stale until
-// the next keyframe (IDR)
-static volatile bool need_keyframe = false;
+// A pause mid-stream drops units undecoded, so the decoder's reference
+// frames are stale until the next keyframe (IDR). Set by the UI thread
+// (vitavideo_stop/start) and the decode thread, so changed atomically
+enum {
+  KEYFRAME_OK,        // decoding normally, or a new stream not started yet
+  KEYFRAME_PAUSED,    // paused mid-stream: drop units
+  KEYFRAME_AWAITED,   // resumed: drop units until a keyframe arrives
+};
+static int keyframe_state = KEYFRAME_OK;
 // When we last asked the host for a keyframe after a pause
 static volatile uint64_t keyframe_request_us = 0;
-// How long to wait for that keyframe before asking common-c for one again
+// How long to wait for that keyframe before asking again
 #define KEYFRAME_RETRY_US 1000000
 // Fixed for a stream at setup, since the textures are created for one format
 static bool decode_yuv = false;
@@ -251,6 +256,16 @@ static int vita_pacer_thread_main(SceSize args, void *argp) {
     // This loop already runs about once a second for the whole stream
     vitastats_tick();
 
+    // The keyframe asked for on resume hasn't come: ask again. Done here, not
+    // when a unit arrives, since a static screen may send none
+    if (__atomic_load_n(&keyframe_state, __ATOMIC_ACQUIRE) == KEYFRAME_AWAITED &&
+        sceKernelGetSystemTimeWide() - keyframe_request_us >= KEYFRAME_RETRY_US) {
+      vita_debug_log("no keyframe %llu ms after resume, requesting another\n",
+                     (sceKernelGetSystemTimeWide() - keyframe_request_us) / 1000);
+      keyframe_request_us = sceKernelGetSystemTimeWide();
+      LiRequestIdrFrame();
+    }
+
     //last_vblank_count = curr_vblank_count;
     uint64_t curr_check_time = sceKernelGetSystemTimeWide();
     uint32_t lapse = curr_check_time - last_check_time;
@@ -334,7 +349,7 @@ static int vita_setup(int videoFormat, int width, int height, int redrawRate, vo
   int ret;
   printf("vita video setup\n");
   decode_thread_logged = false;
-  need_keyframe = false;
+  __atomic_store_n(&keyframe_state, KEYFRAME_OK, __ATOMIC_RELEASE);
   stream_hint_start_us = 0;
   vitastats_reset();
   decode_yuv = config.decode_yuv;
@@ -505,7 +520,8 @@ static int vita_submit_decode_unit(PDECODE_UNIT decodeUnit) {
     decode_thread_logged = true;
   }
 
-  if (need_keyframe && !active_video_thread) {
+  int state = __atomic_load_n(&keyframe_state, __ATOMIC_ACQUIRE);
+  if (state == KEYFRAME_PAUSED) {
     // Paused: the menu covers the stream, so decoding would only burn power.
     // DR_OK, so common-c doesn't treat the dropped units as a decoder error
     // and ask the host for keyframes all through the pause. (Units that come
@@ -513,24 +529,21 @@ static int vita_submit_decode_unit(PDECODE_UNIT decodeUnit) {
     // stream's first keyframe isn't lost.)
     return DR_OK;
   }
-
-  if (need_keyframe) {
+  if (state == KEYFRAME_AWAITED) {
     if (decodeUnit->frameType != FRAME_TYPE_IDR) {
       // P-frames would reference the frames dropped while paused. Keep
-      // dropping until the keyframe vitavideo_start() asked for arrives
-      uint64_t now = LiGetMicroseconds();
-      if (now - keyframe_request_us < KEYFRAME_RETRY_US) {
-        return DR_OK;
-      }
-      // It didn't come: let common-c ask again, and wait for it itself
-      vita_debug_log("no keyframe %llu ms after resume, requesting another\n",
-                     (now - keyframe_request_us) / 1000);
-      keyframe_request_us = now;
-      return DR_NEED_IDR;
+      // dropping until the keyframe vitavideo_start() asked for arrives (the
+      // pacer thread asks again if it doesn't)
+      return DR_OK;
     }
-    vita_debug_log("keyframe %llu ms after resume\n",
-                   (LiGetMicroseconds() - keyframe_request_us) / 1000);
-    need_keyframe = false;
+    // Only if no new pause began meanwhile: then this keyframe is decoded
+    // but not drawn, and the next resume asks for another
+    int expected = KEYFRAME_AWAITED;
+    if (__atomic_compare_exchange_n(&keyframe_state, &expected, KEYFRAME_OK, false,
+                                    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+      vita_debug_log("keyframe %llu ms after resume\n",
+                     (sceKernelGetSystemTimeWide() - keyframe_request_us) / 1000);
+    }
   }
 
   SceAvcdecAu au = {0};
@@ -728,9 +741,10 @@ void vitavideo_start() {
   // even on a static screen where the host would otherwise send nothing.
   // Stamp the time before decoding restarts, and ask once it has, so the
   // keyframe can't arrive while units are still being dropped as paused
-  bool resuming = need_keyframe;
+  bool resuming = __atomic_load_n(&keyframe_state, __ATOMIC_ACQUIRE) == KEYFRAME_PAUSED;
   if (resuming) {
-    keyframe_request_us = LiGetMicroseconds();
+    keyframe_request_us = sceKernelGetSystemTimeWide();
+    __atomic_store_n(&keyframe_state, KEYFRAME_AWAITED, __ATOMIC_RELEASE);
   }
   active_video_thread = true;
   vita2d_set_vblank_wait(config.enable_vita_vblank_wait);
@@ -741,7 +755,7 @@ void vitavideo_start() {
 
 void vitavideo_stop() {
   vita2d_set_vblank_wait(true);
-  need_keyframe = true;
+  __atomic_store_n(&keyframe_state, KEYFRAME_PAUSED, __ATOMIC_RELEASE);
   active_video_thread = false;
 }
 
