@@ -295,8 +295,13 @@ bool config_save(const char* filename, PCONFIGURATION config) {
   write_config_int(fd, "offset",  config->special_keys.offset);
   write_config_int(fd, "size",    config->special_keys.size);
 
-  fclose(fd);
-  return true;
+  // A full card can also fail part way through the writes or the final flush
+  bool written = !ferror(fd);
+  if (fclose(fd) != 0)
+    written = false;
+  if (!written)
+    vita_debug_log("Can't write configuration file: %s", filename);
+  return written;
 }
 
 void update_layout() {
