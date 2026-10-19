@@ -16,6 +16,7 @@
  */
 
 #include "stats.h"
+#include "audio/vita.h"
 #include "config.h"
 #include "debug.h"
 #include "gui/guilib.h"
@@ -291,7 +292,8 @@ void vitastats_tick(void) {
   if (config.save_debug_log) {
     vita_debug_log("[STATS] latency %.1f/%.1f fps rx %.1f drawn %.1f pacer_drop %u lost %u idr %u mbps %.2f "
                    "net %.1f/%.1f queue %.1f/%.1f decode %.1f/%.1f render %.1f/%.1f host %.1f "
-                   "rtt %u/%u fec_rec %u fec_fail %u oos %u pending %d rssi %d%% ch %d overlay %.2f",
+                   "rtt %u/%u fec_rec %u fec_fail %u oos %u pending %d audio_pending %d audio_drop %u "
+                   "rssi %d%% ch %d overlay %.2f",
                    latency_ms, latency_max_ms,
                    received_fps, drawn_fps, w.frames_dropped_by_pacer, w.frames_lost, w.idr_frames, mbps,
                    timing_avg_ms(&w.network), timing_max_ms(&w.network),
@@ -300,6 +302,7 @@ void vitastats_tick(void) {
                    timing_avg_ms(&w.render), timing_max_ms(&w.render),
                    timing_avg_ms(&w.host), rtt_ms, rtt_var_ms,
                    fec_recovered, fec_failed, out_of_sequence, pending_frames,
+                   LiGetPendingAudioDuration(), vitaaudio_dropped_packets(),
                    rssi_percent, channel, timing_avg_ms(&w.overlay));
   }
 }

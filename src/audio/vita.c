@@ -33,6 +33,13 @@ enum {
 #define FRAME_SIZE 240
 #define VITA_SAMPLES 960
 #define BUFFER_SIZE (2 * VITA_SAMPLES)
+
+// Audio queued in common-c but not yet decoded, in ms. sceAudioOutOutput
+// blocks for one VITA_SAMPLES buffer (20 ms), so up to 20 ms piles up between
+// outputs in normal play. Past two buffers it's a backlog from a network
+// stall that would otherwise never drain, so drop packets down to one buffer.
+#define PENDING_DROP_START_MS (2 * VITA_SAMPLES / 48)
+#define PENDING_DROP_STOP_MS (VITA_SAMPLES / 48)
 static int decode_offset;
 static int port;
 
@@ -42,7 +49,15 @@ static OpusMSDecoder* decoder = NULL;
 static short buffer[BUFFER_SIZE];
 static bool decode_thread_logged = false;
 
+static bool catching_up;
+static unsigned int catch_up_dropped;
+static unsigned int dropped_packets;
+static unsigned int catch_ups;
+
 static void vita_renderer_cleanup() {
+  if (dropped_packets > 0) {
+    vita_debug_log("audio: dropped %u packets in %u catch-ups\n", dropped_packets, catch_ups);
+  }
   if (decoder != NULL) {
     opus_multistream_decoder_destroy(decoder);
     decoder = NULL;
@@ -52,6 +67,10 @@ static void vita_renderer_cleanup() {
 static int vita_renderer_init(int audioConfiguration, POPUS_MULTISTREAM_CONFIGURATION opusConfig, void* audioContext, int arFlags) {
   int rc;
   decode_thread_logged = false;
+  catching_up = false;
+  catch_up_dropped = 0;
+  dropped_packets = 0;
+  catch_ups = 0;
   decoder = opus_multistream_decoder_create(opusConfig->sampleRate,
                                             opusConfig->channelCount,
                                             opusConfig->streams,
@@ -74,15 +93,39 @@ static int vita_renderer_init(int audioConfiguration, POPUS_MULTISTREAM_CONFIGUR
   return VITA_AUDIO_INIT_OK;
 }
 
+static bool vita_renderer_should_drop() {
+  int pending = LiGetPendingAudioDuration();
+
+  if (!catching_up) {
+    if (pending <= PENDING_DROP_START_MS)
+      return false;
+    catching_up = true;
+    catch_up_dropped = 0;
+    catch_ups++;
+  } else if (pending <= PENDING_DROP_STOP_MS) {
+    catching_up = false;
+    vita_debug_log("audio: dropped %u packets to catch up\n", catch_up_dropped);
+    return false;
+  }
+
+  catch_up_dropped++;
+  dropped_packets++;
+  return true;
+}
+
 static void vita_renderer_decode_and_play_sample(char* data, int length) {
   if (!data)
     return;
 
   if (!decode_thread_logged) {
-    // With CAPABILITY_DIRECT_SUBMIT this runs on common-c's AudioRecv thread
+    // Runs on common-c's AudioDec thread, so a blocking output doesn't stall
+    // AudioRecv, and late packets queue where LiGetPendingAudioDuration sees them
     vita_debug_log_thread("audio decode");
     decode_thread_logged = true;
   }
+
+  if (vita_renderer_should_drop())
+    return;
 
   int decodeLen = opus_multistream_decode(decoder, data, length, buffer + 2 * decode_offset, FRAME_SIZE, 0);
   if (decodeLen > 0) {
@@ -105,7 +148,7 @@ AUDIO_RENDERER_CALLBACKS audio_callbacks_vita = {
   .init = vita_renderer_init,
   .cleanup = vita_renderer_cleanup,
   .decodeAndPlaySample = vita_renderer_decode_and_play_sample,
-  .capabilities = CAPABILITY_DIRECT_SUBMIT,
+  .capabilities = 0,
 };
 
 
@@ -115,4 +158,8 @@ void vitaaudio_start() {
 
 void vitaaudio_stop() {
   active_audio_thread = false;
+}
+
+unsigned int vitaaudio_dropped_packets() {
+  return dropped_packets;
 }
