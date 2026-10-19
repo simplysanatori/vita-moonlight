@@ -109,7 +109,8 @@ static bool vita_renderer_should_drop() {
   }
 
   catch_up_dropped++;
-  dropped_packets++;
+  // Read by the stats thread
+  __atomic_fetch_add(&dropped_packets, 1, __ATOMIC_RELAXED);
   return true;
 }
 
@@ -161,5 +162,5 @@ void vitaaudio_stop() {
 }
 
 unsigned int vitaaudio_dropped_packets() {
-  return dropped_packets;
+  return __atomic_load_n(&dropped_packets, __ATOMIC_RELAXED);
 }
