@@ -115,7 +115,7 @@ void mapping_save(char* fileName, struct mapping* map) {
   FILE* fd = fopen(fileName, "w");
   if (fd == NULL) {
     fprintf(stderr, "Can't open mapping file: %s\n", fileName);
-    exit(EXIT_FAILURE);
+    return;
   }
 
   write_config(fd, "abs_x", map->abs_x);

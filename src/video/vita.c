@@ -579,12 +579,14 @@ static int vita_submit_decode_unit(PDECODE_UNIT decodeUnit) {
   size_t required_size = decodeUnit->fullLength + SPS_FIXUP_MAX_GROWTH + AV_INPUT_BUFFER_PADDING_SIZE;
   if (decoder_buffer_size < required_size) {
     printf("Reallocating decoder buffer to %u bytes", required_size);
-    decoder_buffer = realloc(decoder_buffer, required_size);
-    decoder_buffer_size = required_size;
-    if (decoder_buffer == NULL) {
-      printf("Out of memory! could not reallocate buffer!!");
-      exit(1);
+    void *grown = realloc(decoder_buffer, required_size);
+    if (grown == NULL) {
+      // Drop this frame and keep the old buffer rather than end the app mid-stream
+      vita_debug_log("Out of memory: can't grow the decoder buffer to %u bytes, dropping the frame", required_size);
+      return DR_NEED_IDR;
     }
+    decoder_buffer = grown;
+    decoder_buffer_size = required_size;
   }
 
 

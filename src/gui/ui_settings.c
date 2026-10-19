@@ -685,7 +685,10 @@ void ui_settings_save_config() {
   vita_debug_log("  enable_ref_frame_invalidation = %d", config.enable_ref_frame_invalidation);
   vita_debug_log("  stream.streamingRemotely = %d", config.stream.streamingRemotely);
   vita_debug_log("  enable_vita_vblank_wait = %d", config.enable_vita_vblank_wait);
-  config_save(config_path, &config);
+  if (!config_save(config_path, &config)) {
+    display_error("Couldn't save the settings. Is the memory card full? They apply until Moonlight closes.");
+    return;
+  }
   vita_debug_log("[DEBUG] Configuración guardada en %s", config_path);
 }
 

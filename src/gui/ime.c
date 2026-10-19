@@ -100,9 +100,9 @@ void oslOskGetText(char *text){
 int ime_dialog_type(SceImeType type, char *text, const char *title, const char *def) {
   sceCommonDialogSetConfigParam(&(SceCommonDialogConfigParam){});
 
-  char userText[512];
+  char userText[512] = "";
   if (def) {
-    strcpy(userText, def);
+    snprintf(userText, sizeof(userText), "%s", def);
   }
 
   int ret = 0;

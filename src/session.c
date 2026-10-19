@@ -68,10 +68,11 @@ int get_app_id(PAPP_LIST list, char *name) {
   return -1;
 }
 
-int get_app_name(PAPP_LIST list, int id, char *name) {
+int get_app_name(PAPP_LIST list, int id, char *name, size_t size) {
   while (list != NULL) {
     if (list->id == id) {
-      strcpy(name, list->name);
+      // The name comes from the host, so it can be any length
+      snprintf(name, size, "%s", list->name);
       return 1;
     }
 

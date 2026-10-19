@@ -27,6 +27,7 @@
 #include <getopt.h>
 #include <ini.h>
 #include "input/vita.h"
+#include "input/keyboardkeys.h"
 #include "debug.h"
 #include "stats.h"
 #include "bench.h"
@@ -206,11 +207,12 @@ bool config_file_parse(char* filename, PCONFIGURATION config) {
   return ini_parse(filename, ini_handle, config);
 }
 
-void config_save(const char* filename, PCONFIGURATION config) {
+bool config_save(const char* filename, PCONFIGURATION config) {
   FILE* fd = fopen(filename, "w");
   if (fd == NULL) {
-    fprintf(stderr, "Can't open configuration file: %s\n", filename);
-    exit(EXIT_FAILURE);
+    // A full memory card, say: keep running with the settings in memory
+    vita_debug_log("Can't open configuration file: %s", filename);
+    return false;
   }
 
   if (config->address)
@@ -294,6 +296,7 @@ void config_save(const char* filename, PCONFIGURATION config) {
   write_config_int(fd, "size",    config->special_keys.size);
 
   fclose(fd);
+  return true;
 }
 
 void update_layout() {
@@ -438,6 +441,17 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
 
   if (config->stats_overlay < STATS_OVERLAY_OFF || config->stats_overlay >= STATS_OVERLAY_COUNT) {
     config->stats_overlay = STATS_OVERLAY_OFF;
+  }
+
+  // A hand-edited or corrupt file could hold any number, and these index tables
+  if (config->touchscreen_mode < 0 || config->touchscreen_mode > 3) {
+    vita_debug_log("touchscreen_mode %d out of range, using 0", config->touchscreen_mode);
+    config->touchscreen_mode = 0;
+  }
+
+  if (config->keyboard_layout < 0 || config->keyboard_layout >= KB_LAYOUT_COUNT) {
+    vita_debug_log("keyboard_layout %d out of range, using 0", config->keyboard_layout);
+    config->keyboard_layout = KB_LAYOUT_EN_US;
   }
 
   if (config->app_list_style < 0 || config->app_list_style >= APP_LIST_STYLE_COUNT) {

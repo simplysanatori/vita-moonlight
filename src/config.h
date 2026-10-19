@@ -124,5 +124,6 @@ extern bool inputAdded;
 
 bool config_file_parse(char* filename, PCONFIGURATION config);
 void config_parse(int argc, char* argv[], PCONFIGURATION config);
-void config_save(const char* filename, PCONFIGURATION config);
+// False when the file can't be written (a full memory card, say)
+bool config_save(const char* filename, PCONFIGURATION config);
 void update_layout();

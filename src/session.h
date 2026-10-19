@@ -25,7 +25,7 @@ void session_set_host(const char *name);
 // The id of the app called name in list, or -1; and the name of app id,
 // copied into name (returning 0 if there isn't one)
 int get_app_id(PAPP_LIST list, char *name);
-int get_app_name(PAPP_LIST list, int id, char *name);
+int get_app_name(PAPP_LIST list, int id, char *name, size_t size);
 
 // Starts streaming appId on the connected host. Returns 0, or a negative
 // code with a message in err.
