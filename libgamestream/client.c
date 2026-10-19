@@ -207,8 +207,11 @@ static int load_serverinfo(PSERVER_DATA server, bool https) {
     goto cleanup;
   }
 
-  if (xml_status(data->memory, data->size) == GS_ERROR) {
-    ret = GS_ERROR;
+  // GS_INVALID too, for a reply that doesn't parse: the fields below would
+  // be freed and then fail to read
+  int status = xml_status(data->memory, data->size);
+  if (status != GS_OK) {
+    ret = status;
     goto cleanup;
   }
 
