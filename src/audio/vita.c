@@ -41,12 +41,16 @@ enum {
 #define PENDING_DROP_START_MS (2 * VITA_SAMPLES / 48)
 #define PENDING_DROP_STOP_MS (VITA_SAMPLES / 48)
 static int decode_offset;
-static int port;
+// -1 while no port is open; a valid port can be 0
+static int port = -1;
 
 static int active_audio_thread = true;
 static OpusMSDecoder* decoder = NULL;
 
-static short buffer[BUFFER_SIZE];
+// sceAudioOutOutput returns while the buffer it was given is still playing,
+// so decode into the other one
+static short buffers[2][BUFFER_SIZE];
+static int buffer_index;
 static bool decode_thread_logged = false;
 
 static bool catching_up;
@@ -54,9 +58,19 @@ static unsigned int catch_up_dropped;
 static unsigned int dropped_packets;
 static unsigned int catch_ups;
 
+// common-c calls this only after a successful init, once its audio threads
+// have exited; init also uses it to undo a partial setup. Safe to call twice.
 static void vita_renderer_cleanup() {
   if (dropped_packets > 0) {
     vita_debug_log("audio: dropped %u packets in %u catch-ups\n", dropped_packets, catch_ups);
+    // Logged once; cleanup may run again (init calls it to drop leftovers)
+    dropped_packets = 0;
+    catch_ups = 0;
+  }
+  if (port >= 0) {
+    int rc = sceAudioOutReleasePort(port);
+    vita_debug_log("release port 0x%x: 0x%x\n", port, rc);
+    port = -1;
   }
   if (decoder != NULL) {
     opus_multistream_decoder_destroy(decoder);
@@ -66,6 +80,10 @@ static void vita_renderer_cleanup() {
 
 static int vita_renderer_init(int audioConfiguration, POPUS_MULTISTREAM_CONFIGURATION opusConfig, void* audioContext, int arFlags) {
   int rc;
+  // Drop anything left from an earlier stream
+  vita_renderer_cleanup();
+  decode_offset = 0;
+  buffer_index = 0;
   decode_thread_logged = false;
   catching_up = false;
   catch_up_dropped = 0;
@@ -78,13 +96,17 @@ static int vita_renderer_init(int audioConfiguration, POPUS_MULTISTREAM_CONFIGUR
                                             opusConfig->mapping,
                                             &rc);
 
-  if (rc < 0) {
+  if (rc < 0 || decoder == NULL) {
+      vita_debug_log("opus decoder create failed: %d\n", rc);
+      vita_renderer_cleanup();
       return VITA_AUDIO_ERROR_BAD_OPUS;
   }
 
   port = sceAudioOutOpenPort(SCE_AUDIO_OUT_PORT_TYPE_MAIN, VITA_SAMPLES, 48000, SCE_AUDIO_OUT_MODE_STEREO);
 
   if (port < 0) {
+      vita_debug_log("open port failed: 0x%x\n", port);
+      port = -1;
       vita_renderer_cleanup();
       return VITA_AUDIO_ERROR_PORT;
   }
@@ -128,6 +150,7 @@ static void vita_renderer_decode_and_play_sample(char* data, int length) {
   if (vita_renderer_should_drop())
     return;
 
+  short *buffer = buffers[buffer_index];
   int decodeLen = opus_multistream_decode(decoder, data, length, buffer + 2 * decode_offset, FRAME_SIZE, 0);
   if (decodeLen > 0) {
     if (decodeLen != FRAME_SIZE)
@@ -138,6 +161,7 @@ static void vita_renderer_decode_and_play_sample(char* data, int length) {
       decode_offset = 0;
       if (active_audio_thread) {
         sceAudioOutOutput(port, buffer);
+        buffer_index ^= 1;
       }
     }
   } else {
