@@ -17,6 +17,7 @@
  * along with Moonlight; if not, see <http://www.gnu.org/licenses/>.
  */
 #include <stdbool.h>
+#include <pthread.h>
 
 #include <psp2/kernel/processmgr.h>
 #include <psp2/power.h>
@@ -51,6 +52,9 @@ static clock_state saved_clocks = {0};
 // CPU-bound, and at stock clocks they can outlast Sunshine's timeouts
 static bool streaming = false;
 static int busy = 0;
+// The stream can end on a common-c thread while the UI thread ends its busy
+// work, so the state and the clock change it leads to are one step
+static pthread_mutex_t clocks_mutex;
 
 static void boost_clocks() {
   if (clocks_boosted) {
@@ -118,6 +122,7 @@ int vitapower_thread(SceSize args, void *argp) {
 }
 
 bool vitapower_init() {
+  pthread_mutex_init(&clocks_mutex, NULL);
   SceUID thid = sceKernelCreateThread("vitapower_thread", vitapower_thread, 0x10000100, 0x40000, 0, 0, NULL);
   if (thid >= 0)
     sceKernelStartThread(thid, 0, NULL);
@@ -135,24 +140,32 @@ void vitapower_config(CONFIGURATION config) {
 
 void vitapower_start() {
   active_power_thread = true;
+  pthread_mutex_lock(&clocks_mutex);
   streaming = true;
   update_clocks();
+  pthread_mutex_unlock(&clocks_mutex);
 }
 
 void vitapower_stop() {
   active_power_thread = false;
+  pthread_mutex_lock(&clocks_mutex);
   streaming = false;
   update_clocks();
+  pthread_mutex_unlock(&clocks_mutex);
 }
 
 void vitapower_busy_begin() {
+  pthread_mutex_lock(&clocks_mutex);
   busy++;
   update_clocks();
+  pthread_mutex_unlock(&clocks_mutex);
 }
 
 void vitapower_busy_end() {
+  pthread_mutex_lock(&clocks_mutex);
   if (busy > 0) {
     busy--;
   }
   update_clocks();
+  pthread_mutex_unlock(&clocks_mutex);
 }
