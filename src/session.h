@@ -14,6 +14,11 @@
 extern SERVER_DATA server;
 extern PAPP_LIST server_applist;
 
+// Reads the connected host's app list again into server_applist, freeing
+// the list it replaces. Call it only while no menu shows the old list's
+// names. Returns GS_OK, or a GS_ error with the old list kept.
+int session_refresh_applist(void);
+
 // Records which host the connection is to, by the name it was paired under
 void session_set_host(const char *name);
 

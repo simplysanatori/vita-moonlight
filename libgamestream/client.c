@@ -212,6 +212,22 @@ static int load_serverinfo(PSERVER_DATA server, bool https) {
     goto cleanup;
   }
 
+  // Each serverinfo fills these again: free what the last one left. Only
+  // once the reply is good, so a failed request keeps the old values.
+  free((char*) server->serverInfo.serverInfoAppVersion);
+  free((char*) server->serverInfo.serverInfoGfeVersion);
+  free(server->gpuType);
+  free(server->gsVersion);
+  server->serverInfo.serverInfoAppVersion = NULL;
+  server->serverInfo.serverInfoGfeVersion = NULL;
+  server->gpuType = NULL;
+  server->gsVersion = NULL;
+  while (server->modes != NULL) {
+    PDISPLAY_MODE next = server->modes->next;
+    free(server->modes);
+    server->modes = next;
+  }
+
   if (xml_search(data->memory, data->size, "currentgame", &currentGameText) != GS_OK) {
     goto cleanup;
   }
@@ -282,6 +298,9 @@ static int load_serverinfo(PSERVER_DATA server, bool https) {
 
   if (currentGameText != NULL)
     free(currentGameText);
+
+  if (stateText != NULL)
+    free(stateText);
 
   if (serverCodecModeSupportText != NULL)
     free(serverCodecModeSupportText);
@@ -865,6 +884,9 @@ int gs_start_app(PSERVER_DATA server, STREAM_CONFIGURATION *config, int appId, b
   free(result);
   result = NULL;
 
+  // The last launch's URL, which this launch replaces
+  free((char*) server->serverInfo.rtspSessionUrl);
+  server->serverInfo.rtspSessionUrl = NULL;
   if (xml_search(data->memory, data->size, "sessionUrl0", &result) == GS_OK) {
     server->serverInfo.rtspSessionUrl = result;
     result = NULL;
@@ -922,6 +944,10 @@ int gs_init(PSERVER_DATA server, char *address, unsigned short httpPort, const c
 
   http_init(keyDirectory, log_level);
 
+  // Clearing the server information drops these, so free them first
+  free((char*) server->serverInfo.serverInfoAppVersion);
+  free((char*) server->serverInfo.serverInfoGfeVersion);
+  free((char*) server->serverInfo.rtspSessionUrl);
   LiInitializeServerInformation(&server->serverInfo);
   server->serverInfo.address = address;
   server->unsupported = unsupported;

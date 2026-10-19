@@ -15,6 +15,7 @@
 
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 
@@ -28,6 +29,33 @@ static char current_host[256] = "";
 
 void session_set_host(const char *name) {
   snprintf(current_host, sizeof(current_host), "%s", name);
+}
+
+// Lists session_open_headless() replaced while a menu may still show their
+// names (it can run from Settings, inside the PC's menu). They're freed with
+// the list that menu replaces next, once nothing can read them.
+static PAPP_LIST replaced_applists = NULL;
+
+static void free_app_list(PAPP_LIST list) {
+  while (list != NULL) {
+    PAPP_LIST next = list->next;
+    free(list->name);
+    free(list);
+    list = next;
+  }
+}
+
+int session_refresh_applist(void) {
+  PAPP_LIST list = NULL;
+  int ret = gs_applist(&server, &list);
+  if (ret != GS_OK) {
+    return ret;
+  }
+  free_app_list(server_applist);
+  free_app_list(replaced_applists);
+  replaced_applists = NULL;
+  server_applist = list;
+  return GS_OK;
 }
 
 int get_app_id(PAPP_LIST list, char *name) {
@@ -154,8 +182,16 @@ int session_open_headless(device_info_t *info, char *err, size_t err_len) {
 
   // Forget the previous PC's apps first: if this PC's list can't be read,
   // a stale list would let a later attempt start one of those IDs here.
-  // Not freed, as elsewhere: menu rows may still point at its names.
-  server_applist = NULL;
+  // Not freed yet: menu rows may still point at its names.
+  if (server_applist != NULL) {
+    PAPP_LIST last = server_applist;
+    while (last->next != NULL) {
+      last = last->next;
+    }
+    last->next = replaced_applists;
+    replaced_applists = server_applist;
+    server_applist = NULL;
+  }
   if (gs_applist(&server, &server_applist) != GS_OK) {
     snprintf(err, err_len, "Can't read the app list from %s: %s", info->name, gs_error ? gs_error : "");
     return -1;
