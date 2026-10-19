@@ -529,6 +529,7 @@ static int vita_submit_decode_unit(PDECODE_UNIT decodeUnit) {
   int state = __atomic_load_n(&keyframe_state, __ATOMIC_ACQUIRE);
   // The keyframe that ends a resume: always drawn, see the frame pacer below
   bool recovery_keyframe = false;
+  bool awaiting_keyframe = false;
   if (state == KEYFRAME_PAUSED) {
     // Paused: the menu covers the stream, so decoding would only burn power.
     // DR_OK, so common-c doesn't treat the dropped units as a decoder error
@@ -544,16 +545,9 @@ static int vita_submit_decode_unit(PDECODE_UNIT decodeUnit) {
       // pacer thread asks again if it doesn't)
       return DR_OK;
     }
-    // Only if no new pause began meanwhile: then this keyframe is decoded
-    // but not drawn, and the next resume asks for another
-    int expected = KEYFRAME_AWAITED;
-    if (__atomic_compare_exchange_n(&keyframe_state, &expected, KEYFRAME_OK, false,
-                                    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-      recovery_keyframe = true;
-      vita_debug_log("keyframe %llu ms after resume\n",
-                     (sceKernelGetSystemTimeWide()
-                      - __atomic_load_n(&keyframe_request_us, __ATOMIC_RELAXED)) / 1000);
-    }
+    // Recovery ends only once this keyframe has decoded (below), so a failed
+    // decode leaves it awaited, with the pacer thread's retries still on
+    awaiting_keyframe = true;
   }
 
   SceAvcdecAu au = {0};
@@ -626,6 +620,20 @@ static int vita_submit_decode_unit(PDECODE_UNIT decodeUnit) {
   if (ret < 0) {
     printf("sceAvcdecDecode (len=0x%x): 0x%x numOfOutput %d\n", decodeUnit->fullLength, ret, array_picture.numOfOutput);
     return DR_NEED_IDR;
+  }
+
+  if (awaiting_keyframe) {
+    // The decoder has its reference again, so P-frames can follow. Only if
+    // no new pause began meanwhile: then this keyframe is decoded but not
+    // drawn, and the next resume asks for another
+    int expected = KEYFRAME_AWAITED;
+    if (__atomic_compare_exchange_n(&keyframe_state, &expected, KEYFRAME_OK, false,
+                                    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+      recovery_keyframe = true;
+      vita_debug_log("keyframe %llu ms after resume\n",
+                     (sceKernelGetSystemTimeWide()
+                      - __atomic_load_n(&keyframe_request_us, __ATOMIC_RELAXED)) / 1000);
+    }
   }
 
   if (array_picture.numOfOutput != 1) {
