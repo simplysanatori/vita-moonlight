@@ -53,6 +53,11 @@
 #define UNIQUEID_BYTES 8
 #define UNIQUEID_CHARS (UNIQUEID_BYTES*2)
 
+// Seconds to wait for launch/resume and cancel, as moonlight-qt does: the PC
+// answers only once it has started or closed the game
+#define LAUNCH_TIMEOUT 120
+#define QUIT_TIMEOUT 30
+
 static char unique_id[UNIQUEID_CHARS+1];
 // Name the host shows for this client (Sunshine lists paired clients by it),
 // stored URL-encoded since it goes straight into the pair query string
@@ -494,6 +499,8 @@ int gs_unpair(PSERVER_DATA server) {
   uuid_unparse(uuid, uuid_str);
   snprintf(url, sizeof(url), "http://%s:%u/unpair?uniqueid=%s&uuid=%s", server->serverInfo.address, server->httpPort, unique_id, uuid_str);
   ret = http_request(url, data);
+  // The kept TLS sessions were made with a certificate the PC no longer trusts
+  http_reset_connections();
 
   http_free_data(data);
   return ret;
@@ -511,6 +518,10 @@ int gs_pair(PSERVER_DATA server, char* pin) {
     return GS_WRONG_STATE;
   }
 
+  // The HTTPS steps must make a new TLS handshake with the certificate being
+  // paired, not resume a session from before
+  http_reset_connections();
+
   unsigned char salt_data[16];
   char salt_hex[SIZEOF_AS_HEX_STR(salt_data)];
   RAND_bytes(salt_data, sizeof(salt_data));
@@ -522,7 +533,8 @@ int gs_pair(PSERVER_DATA server, char* pin) {
   PHTTP_DATA data = http_create_data();
   if (data == NULL)
     return GS_OUT_OF_MEMORY;
-  else if ((ret = http_request(url, data)) != GS_OK)
+  // The PC answers once the user has typed the PIN there, so wait for ever
+  else if ((ret = http_request_timeout(url, data, 0)) != GS_OK)
     goto cleanup;
 
   if ((ret = xml_status(data->memory, data->size) != GS_OK))
@@ -868,7 +880,8 @@ int gs_start_app(PSERVER_DATA server, STREAM_CONFIGURATION *config, int appId, b
            server->serverInfo.address, server->httpsPort, server->currentGame ? "resume" : "launch", unique_id, uuid_str, appId, config->width, config->height, fps, sops, rikey_hex, rikeyid, localaudio, surround_info, gamepad_mask, gamepad_mask,
            (config->supportedVideoFormats & VIDEO_FORMAT_MASK_10BIT) ? "&hdrMode=1&clientHdrCapVersion=0&clientHdrCapSupportedFlagsInUint32=0&clientHdrCapMetaDataId=NV_STATIC_METADATA_TYPE_1&clientHdrCapDisplayData=0x0x0x0x0x0x0x0x0x0x0" : "",
            LiGetLaunchUrlQueryParameters());
-  if ((ret = http_request(url, data)) == GS_OK)
+  // The PC starts the game before it answers, which can take a while
+  if ((ret = http_request_timeout(url, data, LAUNCH_TIMEOUT)) == GS_OK)
     server->currentGame = appId;
   else
     goto cleanup;
@@ -916,7 +929,7 @@ int gs_quit_app(PSERVER_DATA server) {
   uuid_generate_random(uuid);
   uuid_unparse(uuid, uuid_str);
   snprintf(url, sizeof(url), "https://%s:%u/cancel?uniqueid=%s&uuid=%s", server->serverInfo.address, server->httpsPort, unique_id, uuid_str);
-  if ((ret = http_request(url, data)) != GS_OK)
+  if ((ret = http_request_timeout(url, data, QUIT_TIMEOUT)) != GS_OK)
     goto cleanup;
 
   if ((ret = xml_status(data->memory, data->size) != GS_OK))
@@ -945,7 +958,8 @@ int gs_init(PSERVER_DATA server, char *address, unsigned short httpPort, const c
   if (load_cert(keyDirectory))
     return GS_FAILED;
 
-  http_init(keyDirectory, log_level);
+  if (http_init(keyDirectory, log_level) != GS_OK)
+    return GS_FAILED;
 
   // Clearing the server information drops these, so free them first
   free((char*) server->serverInfo.serverInfoAppVersion);

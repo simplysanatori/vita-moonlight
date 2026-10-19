@@ -29,8 +29,14 @@ typedef struct _HTTP_DATA {
   size_t size;
 } HTTP_DATA, *PHTTP_DATA;
 
+// Seconds a request may take in all, unless it asks for its own timeout
+#define HTTP_REQUEST_TIMEOUT 10
+
 int http_init(const char* keyDirectory, int logLevel);
+// Closes kept connections and forgets TLS sessions, for when the pairing changes
+void http_reset_connections();
 PHTTP_DATA http_create_data();
+// Gives up after HTTP_REQUEST_TIMEOUT seconds
 int http_request(char* url, PHTTP_DATA data);
 // As http_request, but gives up after timeout_seconds (0 waits for ever)
 int http_request_timeout(char* url, PHTTP_DATA data, long timeout_seconds);

@@ -48,11 +48,17 @@ static size_t _write_curl(void *contents, size_t size, size_t nmemb, void *userp
   return realsize;
 }
 
-int http_init(const char* keyDirectory, int logLevel) {
-  curl = curl_easy_init();
-  debug = logLevel >= 2;
-  if (!curl)
-    return GS_FAILED;
+// Connecting to a PC on the LAN takes milliseconds, including the TLS
+// handshake. A PC that is off or asleep never answers, so give up quickly
+// rather than block the menu (waking PCs are polled separately).
+#define HTTP_CONNECT_TIMEOUT 3
+
+static char key_directory[4096];
+
+static CURL *create_handle(const char* keyDirectory) {
+  CURL *handle = curl_easy_init();
+  if (!handle)
+    return NULL;
 
   char certificateFilePath[4096];
   sprintf(certificateFilePath, "%s/%s", keyDirectory, CERTIFICATE_FILE_NAME);
@@ -60,33 +66,63 @@ int http_init(const char* keyDirectory, int logLevel) {
   char keyFilePath[4096];
   sprintf(&keyFilePath[0], "%s/%s", keyDirectory, KEY_FILE_NAME);
 
-  curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
-  curl_easy_setopt(curl, CURLOPT_SSLENGINE_DEFAULT, 1L);
-  curl_easy_setopt(curl, CURLOPT_SSLCERTTYPE,"PEM");
-  curl_easy_setopt(curl, CURLOPT_SSLCERT, certificateFilePath);
-  curl_easy_setopt(curl, CURLOPT_SSLKEYTYPE, "PEM");
-  curl_easy_setopt(curl, CURLOPT_SSLKEY, keyFilePath);
-  curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
-  curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, _write_curl);
-  curl_easy_setopt(curl, CURLOPT_FAILONERROR, 1L);
-  curl_easy_setopt(curl, CURLOPT_SSL_SESSIONID_CACHE, 0L);
+  curl_easy_setopt(handle, CURLOPT_SSL_VERIFYHOST, 0L);
+  curl_easy_setopt(handle, CURLOPT_SSLENGINE_DEFAULT, 1L);
+  curl_easy_setopt(handle, CURLOPT_SSLCERTTYPE,"PEM");
+  curl_easy_setopt(handle, CURLOPT_SSLCERT, certificateFilePath);
+  curl_easy_setopt(handle, CURLOPT_SSLKEYTYPE, "PEM");
+  curl_easy_setopt(handle, CURLOPT_SSLKEY, keyFilePath);
+  curl_easy_setopt(handle, CURLOPT_SSL_VERIFYPEER, 0L);
+  curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, _write_curl);
+  curl_easy_setopt(handle, CURLOPT_FAILONERROR, 1L);
+  curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT, (long) HTTP_CONNECT_TIMEOUT);
+  // Connections and TLS sessions are kept for the next request: opening a PC
+  // makes several, and each new TLS handshake is slow on the Vita. They are
+  // dropped with the handle when the client certificate or pairing changes.
 
-  return GS_OK;
+  return handle;
+}
+
+int http_init(const char* keyDirectory, int logLevel) {
+  pthread_mutex_lock(&curl_lock);
+  debug = logLevel >= 2;
+  // gs_init runs on every connect: keep the handle, and with it the open
+  // connections, unless this is another PC's certificate
+  if (!curl || strcmp(key_directory, keyDirectory) != 0) {
+    if (curl)
+      curl_easy_cleanup(curl);
+    snprintf(key_directory, sizeof(key_directory), "%s", keyDirectory);
+    curl = create_handle(keyDirectory);
+  }
+  int ret = curl ? GS_OK : GS_FAILED;
+  pthread_mutex_unlock(&curl_lock);
+  return ret;
+}
+
+void http_reset_connections() {
+  pthread_mutex_lock(&curl_lock);
+  if (curl) {
+    curl_easy_cleanup(curl);
+    curl = create_handle(key_directory);
+  }
+  pthread_mutex_unlock(&curl_lock);
 }
 
 int http_request(char* url, PHTTP_DATA data) {
-  return http_request_timeout(url, data, 0);
+  return http_request_timeout(url, data, HTTP_REQUEST_TIMEOUT);
 }
 
 int http_request_timeout(char* url, PHTTP_DATA data, long timeout_seconds) {
   pthread_mutex_lock(&curl_lock);
   int ret = GS_OK;
+  if (!curl) {
+    gs_error = "HTTP client not initialised";
+    ret = GS_FAILED;
+    goto done;
+  }
   curl_easy_setopt(curl, CURLOPT_WRITEDATA, data);
   curl_easy_setopt(curl, CURLOPT_URL, url);
   curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout_seconds);
-//#ifdef __FreeBSD__
-  curl_easy_setopt(curl, CURLOPT_FORBID_REUSE, 1);
-//#endif
 
   if (debug)
     printf("Request %s\n", url);
@@ -118,7 +154,11 @@ done:
 }
 
 void http_cleanup() {
+  pthread_mutex_lock(&curl_lock);
   curl_easy_cleanup(curl);
+  curl = NULL;
+  key_directory[0] = '\0';
+  pthread_mutex_unlock(&curl_lock);
 }
 
 PHTTP_DATA http_create_data() {
