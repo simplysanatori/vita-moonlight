@@ -46,6 +46,11 @@ static int powermode = ENABLE_ALL;
 static bool active_power_thread = false;
 static bool clocks_boosted = false;
 static clock_state saved_clocks = {0};
+// Clocks are boosted while streaming, and while the network work around it
+// runs (vitapower_busy_begin): TLS, pairing's RSA and the RTSP handshake are
+// CPU-bound, and at stock clocks they can outlast Sunshine's timeouts
+static bool streaming = false;
+static int busy = 0;
 
 static void boost_clocks() {
   if (clocks_boosted) {
@@ -77,6 +82,20 @@ static void restore_clocks() {
   scePowerSetGpuClockFrequency(saved_clocks.gpu);
   scePowerSetGpuXbarClockFrequency(saved_clocks.gpu_xbar);
   clocks_boosted = false;
+
+  vita_debug_log("Clocks restored (arm/bus/gpu/xbar): %d/%d/%d/%d MHz",
+                 scePowerGetArmClockFrequency(), scePowerGetBusClockFrequency(),
+                 scePowerGetGpuClockFrequency(), scePowerGetGpuXbarClockFrequency());
+}
+
+static void update_clocks() {
+  // Read the global config so a change made in the settings menu applies to
+  // the next stream, or when turned off from the pause menu, to this one
+  if (config.boost_clocks && (streaming || busy > 0)) {
+    boost_clocks();
+  } else {
+    restore_clocks();
+  }
 }
 
 int vitapower_thread(SceSize args, void *argp) {
@@ -116,16 +135,24 @@ void vitapower_config(CONFIGURATION config) {
 
 void vitapower_start() {
   active_power_thread = true;
-  // Read the global config so a change made in the settings menu applies to the next stream
-  if (config.boost_clocks) {
-    boost_clocks();
-  } else {
-    // Turned off from the pause menu during this stream
-    restore_clocks();
-  }
+  streaming = true;
+  update_clocks();
 }
 
 void vitapower_stop() {
   active_power_thread = false;
-  restore_clocks();
+  streaming = false;
+  update_clocks();
+}
+
+void vitapower_busy_begin() {
+  busy++;
+  update_clocks();
+}
+
+void vitapower_busy_end() {
+  if (busy > 0) {
+    busy--;
+  }
+  update_clocks();
 }

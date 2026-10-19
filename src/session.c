@@ -85,9 +85,7 @@ int get_app_name(PAPP_LIST list, int id, char *name) {
 // then fails to start
 static bool start_launched_app = false;
 
-// Starts streaming appId. Returns 0, or a negative code with a message in err,
-// so callers decide whether to show it (the benchmark runs without dialogs).
-int session_start_stream(int appId, char *err, size_t err_len) {
+static int start_stream(int appId, char *err, size_t err_len) {
   start_launched_app = false;
   // TODO support force controller id
   vita_debug_log("Running gs_start_app...");
@@ -153,9 +151,18 @@ int session_start_stream(int appId, char *err, size_t err_len) {
            connection_failed_stage_name, ret);
   return ret < 0 ? ret : -1;
 }
+// Starts streaming appId. Returns 0, or a negative code with a message in err,
+// so callers decide whether to show it (the benchmark runs without dialogs).
+int session_start_stream(int appId, char *err, size_t err_len) {
+  // The launch and the RTSP handshake run at the stream's clocks; once it
+  // starts, vitapower_start() keeps them up until it ends
+  vitapower_busy_begin();
+  int ret = start_stream(appId, err, err_len);
+  vitapower_busy_end();
+  return ret;
+}
 
-
-int session_open_headless(device_info_t *info, char *err, size_t err_len) {
+static int open_headless(device_info_t *info, char *err, size_t err_len) {
   char key_dir[4096];
   snprintf(key_dir, sizeof(key_dir), "%s/%s", config.key_dir, info->name);
 
@@ -198,6 +205,13 @@ int session_open_headless(device_info_t *info, char *err, size_t err_len) {
   }
   connection_paired();
   return 0;
+}
+
+int session_open_headless(device_info_t *info, char *err, size_t err_len) {
+  vitapower_busy_begin();
+  int ret = open_headless(info, err, err_len);
+  vitapower_busy_end();
+  return ret;
 }
 
 bool session_server_ready(void) {

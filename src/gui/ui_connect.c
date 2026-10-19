@@ -127,7 +127,9 @@ int ui_connect_loop(int id, void *context, const input_data *input) {
               (uint32_t)rand() % 10, (uint32_t)rand() % 10, (uint32_t)rand() % 10, (uint32_t)rand() % 10);
       flash_message("Please enter the following PIN\non the target PC:\n\n%s", pin);
       vita_debug_log("[UI] gs_pair: calling gs_pair at %u", (unsigned)time(NULL));
+      vitapower_busy_begin();
       ret = gs_pair(&server, &pin[0]);
+      vitapower_busy_end();
       vita_debug_log("[UI] gs_pair: returned ret=%d at %u", ret, (unsigned)time(NULL));
       if (ret == 0) {
         connection_paired();
@@ -228,7 +230,9 @@ int ui_connect(char *name, char *address, uint16_t port) {
     char key_dir[4096];
     sprintf(key_dir, "%s/%s", config.key_dir, name);
 
+    vitapower_busy_begin();
     ret = gs_init(&server, address, port, key_dir, 0, true);
+    vitapower_busy_end();
     session_set_host(name);
     if (ret == GS_OUT_OF_MEMORY) {
       display_error("Not enough memory");
@@ -262,7 +266,9 @@ int ui_connected_menu() {
   pos[0] = pos[1] = 0;
   if (server.paired) {
     // The last menu has closed, so its list can be freed
+    vitapower_busy_begin();
     ret = session_refresh_applist();
+    vitapower_busy_end();
     if (ret != GS_OK) {
       display_error("Can't get applist!\n%d\n%s", ret, gs_error);
       return 0;
@@ -398,7 +404,11 @@ device_info_t* ui_connect_and_pairing(device_info_t *info) {
   sprintf(key_dir, "%s/%s", config.key_dir, info->name);
   sceIoMkdir(key_dir, 0777);
 
+  // Connecting and pairing run TLS and RSA, slow enough at stock clocks for
+  // Sunshine to time out, so they get the stream's clock boost
+  vitapower_busy_begin();
   int ret = gs_init(&server, info->internal, info->port, key_dir, 0, true);
+  vitapower_busy_end();
 
   if (ret == GS_OUT_OF_MEMORY) {
     display_error("Not enough memory");
@@ -448,7 +458,9 @@ device_info_t* ui_connect_and_pairing(device_info_t *info) {
           (int)rand() % 10, (int)rand() % 10, (int)rand() % 10, (int)rand() % 10);
   flash_message("Please enter the following PIN\non the target PC:\n\n%s", pin);
 
+  vitapower_busy_begin();
   ret = gs_pair(&server, pin);
+  vitapower_busy_end();
   if (ret != GS_OK) {
     display_error("Pairing failed: %d", ret);
     connection_terminate();
@@ -531,7 +543,10 @@ bool check_connection(const char *name, char *addr, uint16_t port) {
   char key_dir[4096];
   sprintf(key_dir, "%s/%s", config.key_dir, name);
 
-  if (gs_init(&server, addr, port, key_dir, log_level, true) != GS_OK) {
+  vitapower_busy_begin();
+  int ret = gs_init(&server, addr, port, key_dir, log_level, true);
+  vitapower_busy_end();
+  if (ret != GS_OK) {
     return false;
   }
 

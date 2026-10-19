@@ -22,3 +22,9 @@ void vitapower_config(CONFIGURATION config);
 
 void vitapower_start();
 void vitapower_stop();
+
+// Boost the clocks (if boost_clocks is on) for CPU-heavy network work outside
+// a stream: connecting, pairing, the app list and starting a stream. Calls
+// nest; each begin needs its end.
+void vitapower_busy_begin();
+void vitapower_busy_end();
