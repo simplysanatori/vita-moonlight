@@ -461,12 +461,13 @@ static const char *help_text(int row) {
     case ROW_GOOD:
       return "For a strong signal, such as in the same room as your router, or a wired PS TV. "
              "Applies the settings for what matters most to you; with Balanced that's 1280x720 at "
-             "20 Mbps. Also turns the frame pacer and V-Sync off.";
+             "20 Mbps. Also turns V-Sync off and sets Frame pacing to Smooth, or Off when "
+             "Lowest delay matters most.";
     case ROW_WEAK:
       return "For a weaker signal, such as further from your router or through walls. Applies "
              "the settings for what matters most to you; with Balanced that's 960x540 at 10 Mbps, "
              "which looks the same on the Vita's screen and needs half the bandwidth. Also turns "
-             "the frame pacer and V-Sync off.";
+             "V-Sync off and sets Frame pacing to Smooth, or Off when Lowest delay matters most.";
     default:
       return NULL;
   }

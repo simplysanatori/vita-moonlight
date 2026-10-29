@@ -29,8 +29,15 @@
 #include <psp2/power.h>
 #include <vita2d.h>
 
-#define STATS_LINE_COUNT 11
+// Latency, stream, FPS, loss, net, pacing, decode, host, Wi-Fi, Wi-Fi Turbo,
+// clocks, overlay. STATS_ADD drops any line beyond this rather than overflow.
+#define STATS_LINE_COUNT 12
 #define STATS_LINE_LENGTH 80
+#define STATS_ADD(...)                                              \
+  do {                                                              \
+    if (n < STATS_LINE_COUNT)                                       \
+      snprintf(new_lines[n++], STATS_LINE_LENGTH, __VA_ARGS__);     \
+  } while (0)
 #define STATS_FONT_SIZE 16
 #define STATS_LINE_HEIGHT 18
 // Below this the Wi-Fi reading is drawn in yellow; frame loss starts to climb
@@ -304,41 +311,41 @@ void vitastats_tick(void) {
   char new_lines[STATS_LINE_COUNT][STATS_LINE_LENGTH];
   int n = 0;
   if (w.pipeline.count == 0) {
-    snprintf(new_lines[n++], STATS_LINE_LENGTH, "Latency n/a");
+    STATS_ADD("Latency n/a");
   } else {
-    snprintf(new_lines[n++], STATS_LINE_LENGTH, "Latency ~%.0f ms (max %.0f)%s",
+    STATS_ADD("Latency ~%.0f ms (max %.0f)%s",
              latency_ms, latency_max_ms, have_rtt ? "" : ", no RTT yet");
   }
-  snprintf(new_lines[n++], STATS_LINE_LENGTH, "%dx%d@%d  %.1f / %.1f Mbps",
+  STATS_ADD("%dx%d@%d  %.1f / %.1f Mbps",
            config.stream.width, config.stream.height, config.stream.fps,
            mbps, config.stream.bitrate / 1000.0f);
-  snprintf(new_lines[n++], STATS_LINE_LENGTH, "FPS rx %.1f  drawn %.1f  pacer drop %u",
+  STATS_ADD("FPS rx %.1f  drawn %.1f  pacer drop %u",
            received_fps, drawn_fps, w.frames_dropped_by_pacer);
-  snprintf(new_lines[n++], STATS_LINE_LENGTH, "Lost %u  IDR %u  FEC rec %u fail %u  OOS %u",
+  STATS_ADD("Lost %u  IDR %u  FEC rec %u fail %u  OOS %u",
            w.frames_lost, w.idr_frames, fec_recovered, fec_failed, out_of_sequence);
-  snprintf(new_lines[n++], STATS_LINE_LENGTH, "Net %.1f/%.1f ms  Queue %.1f/%.1f ms (%d)",
+  STATS_ADD("Net %.1f/%.1f ms  Queue %.1f/%.1f ms (%d)",
            timing_avg_ms(&w.network), timing_max_ms(&w.network),
            timing_avg_ms(&w.queue), timing_max_ms(&w.queue), pending_frames);
   if (w.presenter_vblanks > 0) {
     // Frames shown, refreshes that repeated the last frame, frames thrown away to
     // catch up, and how many were waiting at each refresh
-    snprintf(new_lines[n++], STATS_LINE_LENGTH, "Smooth: shown %u  repeat %u  drop %u  queue %.1f/%u  wait %.1f ms",
+    STATS_ADD("Smooth: shown %u  repeat %u  drop %u  queue %.1f/%u  wait %.1f ms",
              w.presenter_vblanks - w.presenter_repeats, w.presenter_repeats, w.frames_dropped_by_presenter,
              (float)w.queue_depth_sum / w.presenter_vblanks, w.queue_depth_max, timing_avg_ms(&w.queue_wait));
   } else {
-    snprintf(new_lines[n++], STATS_LINE_LENGTH, "Frame pacing off: frames drawn as they are decoded");
+    STATS_ADD("Frame pacing off: frames drawn as they are decoded");
   }
-  snprintf(new_lines[n++], STATS_LINE_LENGTH, "Decode %.1f/%.1f ms  Render %.1f/%.1f ms",
+  STATS_ADD("Decode %.1f/%.1f ms  Render %.1f/%.1f ms",
            timing_avg_ms(&w.decode), timing_max_ms(&w.decode),
            timing_avg_ms(&w.render), timing_max_ms(&w.render));
   if (have_rtt) {
-    snprintf(new_lines[n++], STATS_LINE_LENGTH, "Host %.1f ms  RTT %u +/- %u ms",
+    STATS_ADD("Host %.1f ms  RTT %u +/- %u ms",
              timing_avg_ms(&w.host), rtt_ms, rtt_var_ms);
   } else {
-    snprintf(new_lines[n++], STATS_LINE_LENGTH, "Host %.1f ms  RTT n/a", timing_avg_ms(&w.host));
+    STATS_ADD("Host %.1f ms  RTT n/a", timing_avg_ms(&w.host));
   }
   int new_wifi_line = n;
-  snprintf(new_lines[n++], STATS_LINE_LENGTH, "Wi-Fi %d%% (%d dBm) ch %d  packet %d B",
+  STATS_ADD("Wi-Fi %d%% (%d dBm) ch %d  packet %d B",
            rssi_percent, rssi_dbm, channel, config.stream.packetSize);
   if (have_turbo) {
     // The signal against the noise says more than its strength alone: a
@@ -347,13 +354,13 @@ void vitastats_tick(void) {
     if (turbo.link) {
       snprintf(snr, sizeof(snr), "SNR %d dB  noise %d dBm", turbo.snr_db, turbo.noise_floor_dbm);
     }
-    snprintf(new_lines[n++], STATS_LINE_LENGTH, "%s  profile %s", snr, turbo.profile ? turbo.profile : "n/a");
+    STATS_ADD("%s  profile %s", snr, turbo.profile ? turbo.profile : "n/a");
   }
-  snprintf(new_lines[n++], STATS_LINE_LENGTH, "Clocks cpu %d bus %d gpu %d MHz",
+  STATS_ADD("Clocks cpu %d bus %d gpu %d MHz",
            scePowerGetArmClockFrequency(), scePowerGetBusClockFrequency(),
            scePowerGetGpuClockFrequency());
 
-  snprintf(new_lines[n++], STATS_LINE_LENGTH, "Overlay %.2f ms CPU per frame", timing_avg_ms(&w.overlay));
+  STATS_ADD("Overlay %.2f ms CPU per frame", timing_avg_ms(&w.overlay));
 
   pthread_mutex_lock(&stats_mutex);
   memcpy(lines, new_lines, sizeof(lines));
