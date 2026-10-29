@@ -111,6 +111,7 @@ int vitapower_thread(SceSize args, void *argp) {
     if (powermode & DISABLE_SUSPEND) {
       sceKernelPowerTick(SCE_KERNEL_POWER_TICK_DISABLE_AUTO_SUSPEND);
       sceKernelPowerTick(SCE_KERNEL_POWER_TICK_DISABLE_OLED_OFF);
+      sceKernelPowerTick(SCE_KERNEL_POWER_TICK_DISABLE_OLED_DIMMING);
     }
     if (!scePowerIsBatteryCharging() && scePowerIsLowBattery()) {
       // TODO print warning message
