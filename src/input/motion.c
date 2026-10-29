@@ -18,7 +18,9 @@ bool active_motion_threads = false;
 
 // The host picks the report rate, so it can ask for more than the loops below
 // can sleep for: 1000/rate is 0 above 1000 Hz, and the thread would spin.
-// Nothing sensible needs more than 500 reports a second from a Vita.
+// Nothing sensible needs more than 500 reports a second from a Vita, so a
+// host asking for 1000 Hz gets 500 Hz. Rates are no longer rounded to whole
+// milliseconds either: 60 Hz is a 16666 us period, not 16000 us.
 #define MOTION_MIN_PERIOD_US 2000
 #define MOTION_MAX_PERIOD_US 1000000
 
