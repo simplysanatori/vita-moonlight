@@ -20,6 +20,7 @@
 #include "../video.h"
 #include "../config.h"
 #include "../debug.h"
+#include "../threadplan.h"
 #include "../gui/guilib.h"
 #include "../util.h"
 #include "../input/vita.h"
@@ -113,6 +114,117 @@ SceUID pacer_thread = -1;
 SceUID presenter_thread = -1;
 SceVideodecQueryInitInfoHwAvcdec *init = NULL;
 SceAvcdecQueryDecoderInfo *decoder_info = NULL;
+
+// Reference frames the decoder is created with when reference frame invalidation
+// is on, largest first: after a lost frame the host encodes against an older
+// picture than the last one, and the decoder has to still hold it
+static const int RFI_REF_FRAME_CANDIDATES[] = {16, 8, 5};
+// The fewest references reference frame invalidation may get, whatever they cost:
+// NVENC's default count, so the SPS never has to lie about it
+#define RFI_MIN_REF_FRAMES 5
+// What the decoder is created with without it, when the SPS says there is just one
+#define DEFAULT_REF_FRAMES 4
+// The most the decoder's memblock may take from PHYCONT, which defaults to 26 MiB
+// and has to share it. 16 references fit at 960x544, but not at 1280x720. Counts
+// above RFI_MIN_REF_FRAMES are held to it
+#define RFI_DECODER_MEM_LIMIT (16 * 1024 * 1024)
+// What gs_sps_fix may keep of the host's num_ref_frames: the decoder's count with
+// reference frame invalidation on, 1 without
+static int sps_ref_frames = 1;
+// The flags gs_sps_fix gets, fixed for a stream at setup
+static int sps_flags = GS_SPS_BITSTREAM_FIXUP;
+// Successful decodes since the decoder last output a picture: above 0, it holds
+// pictures back
+static int decodes_without_output = 0;
+static int worst_output_lag = 0;
+// The resume keyframe decoded but hasn't come out yet
+static bool recovery_output_pending = false;
+
+// Whether a decoder for refs reference frames can be created at this size, tried
+// out and released again. mem_size is the memblock it takes. With capped, a
+// memblock over RFI_DECODER_MEM_LIMIT fails it.
+static bool vita_probe_ref_frames(int refs, bool capped, unsigned horizontal, unsigned vertical, size_t *mem_size) {
+  *mem_size = 0;
+
+  SceVideodecQueryInitInfoHwAvcdec probe_init = {0};
+  probe_init.size = sizeof(probe_init);
+  probe_init.horizontal = horizontal;
+  probe_init.vertical = vertical;
+  probe_init.numOfRefFrames = refs;
+  probe_init.numOfStreams = 1;
+  int ret = sceVideodecInitLibrary(SCE_VIDEODEC_TYPE_HW_AVCDEC, &probe_init);
+  if (ret < 0) {
+    printf("%d reference frames: sceVideodecInitLibrary 0x%x\n", refs, ret);
+    return false;
+  }
+
+  bool ok = false;
+  SceAvcdecQueryDecoderInfo probe_info = {0};
+  probe_info.horizontal = horizontal;
+  probe_info.vertical = vertical;
+  probe_info.numOfRefFrames = refs;
+  SceAvcdecDecoderInfo probe_out = {0};
+  ret = sceAvcdecQueryDecoderMemSize(SCE_VIDEODEC_TYPE_HW_AVCDEC, &probe_info, &probe_out);
+  if (ret < 0) {
+    printf("%d reference frames: sceAvcdecQueryDecoderMemSize 0x%x\n", refs, ret);
+  } else {
+    // Rounded up to 1 MiB, as the real memblock is
+    *mem_size = (probe_out.frameMemSize + 0xFFFFF) & ~0xFFFFF;
+    if (capped && *mem_size > RFI_DECODER_MEM_LIMIT) {
+      printf("%d reference frames: decoder memblock %u KiB is over the %u KiB limit\n",
+             refs, (unsigned)(*mem_size / 1024), (unsigned)(RFI_DECODER_MEM_LIMIT / 1024));
+    } else {
+      SceUID block = sceKernelAllocMemBlock("decoder_probe", SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_NC_RW,
+                                            *mem_size, NULL);
+      if (block < 0) {
+        printf("%d reference frames: can't allocate %u KiB of PHYCONT, 0x%08x\n",
+               refs, (unsigned)(*mem_size / 1024), block);
+      } else {
+        SceAvcdecCtrl probe_ctrl = {0};
+        probe_ctrl.frameBuf.size = *mem_size;
+        ret = sceKernelGetMemBlockBase(block, &probe_ctrl.frameBuf.pBuf);
+        if (ret >= 0) {
+          ret = sceAvcdecCreateDecoder(SCE_VIDEODEC_TYPE_HW_AVCDEC, &probe_ctrl, &probe_info);
+          if (ret >= 0) {
+            sceAvcdecDeleteDecoder(&probe_ctrl);
+            ok = true;
+          } else {
+            printf("%d reference frames: sceAvcdecCreateDecoder 0x%x\n", refs, ret);
+          }
+        } else {
+          printf("%d reference frames: sceKernelGetMemBlockBase 0x%x\n", refs, ret);
+        }
+        sceKernelFreeMemBlock(block);
+      }
+    }
+  }
+
+  sceVideodecTermLibrary(SCE_VIDEODEC_TYPE_HW_AVCDEC);
+  return ok;
+}
+
+// How many reference frames to create the decoder with, and so to let the SPS keep
+static int vita_pick_ref_frames(unsigned horizontal, unsigned vertical, bool rfi) {
+  if (!rfi) {
+    return DEFAULT_REF_FRAMES;
+  }
+
+  int count = sizeof(RFI_REF_FRAME_CANDIDATES) / sizeof(RFI_REF_FRAME_CANDIDATES[0]);
+  for (int i = 0; i < count; i++) {
+    size_t mem_size;
+    int refs = RFI_REF_FRAME_CANDIDATES[i];
+    if (vita_probe_ref_frames(refs, refs > RFI_MIN_REF_FRAMES, horizontal, vertical, &mem_size)) {
+      printf("reference frame invalidation: decoder with %d reference frames, memblock %u KiB\n",
+             refs, (unsigned)(mem_size / 1024));
+      return refs;
+    }
+  }
+  // Not even RFI_MIN_REF_FRAMES, which is not capped, so the decoder can't hold what the host
+  // may use. The SPS then says fewer, and recovery after a loss can smear
+  printf("reference frame invalidation: no decoder with %d reference frames, using %d; "
+         "the host may use more, so recovery can smear\n", RFI_MIN_REF_FRAMES, DEFAULT_REF_FRAMES);
+  return DEFAULT_REF_FRAMES;
+}
 
 typedef struct {
   bool activated;
@@ -252,13 +364,19 @@ void update_scaling_settings(int width, int height) {
 
 // Frames kept queued behind the one being shown
 #define PRESENT_RESERVE 1
-// Refreshes the queue may stay beyond the reserve plus one before a frame is dropped
+// Refreshes the queue may stay over the reserve before its oldest frame is
+// dropped. One frame over is usually host/panel clock drift: wait, the extra
+// frame may cover the next late one. Two or more is a burst after a stall that
+// has already played out: drop sooner, keeping it only costs latency.
 #define PRESENT_CATCHUP_VBLANKS 30
+#define PRESENT_CATCHUP_BURST_VBLANKS 6
 // Refreshes measured to log the panel's real rate
 #define PRESENT_RATE_SAMPLES 300
-// User thread priorities run from 64 (highest) to 191. This thread sleeps most
-// of each refresh and has a short deadline, so it ranks above the decoder.
-#define PRESENTER_THREAD_PRIORITY 70
+// Named for src/threadplan.c, which ranks it: below the audio threads and
+// VideoRecv, above VideoDec. The priority is the fallback without that entry
+// (user priorities run from 64, most urgent, to 191).
+#define PRESENTER_THREAD_NAME "VideoPresent"
+#define PRESENTER_THREAD_PRIORITY 73
 #define PRESENTER_STACK_SIZE 0x20000
 
 enum {
@@ -296,11 +414,18 @@ static bool queue_open = false;
 // Fixed for a stream at setup
 static bool presenter_enabled = false;
 static bool active_presenter_thread = false;
+// The presenter didn't stop in time, so the textures it may draw are kept
+static bool presenter_stuck = false;
 static uint32_t display_period_us = 16667;
 static float display_hz = 60.0f;
 static int present_margin_us = 4000;
 // Refreshes the first frame is held for while the reserve builds
 static int present_hold_max = 1;
+
+// The slot a unit that produced no picture was decoded into, kept for the next
+// unit. Owned by the decode thread. It stays DECODING, so there is still at most
+// one DECODING slot.
+static int held_slot = -1;
 
 // Used only by the presenter thread
 static bool present_primed = false;
@@ -417,8 +542,10 @@ static void present_vblank(void) {
   uint64_t decoded_us = 0;
   pthread_mutex_lock(&queue_mutex);
   depth = ready_count;
-  if (depth > PRESENT_RESERVE + 1) {
-    if (++present_over >= PRESENT_CATCHUP_VBLANKS) {
+  int over = depth - (PRESENT_RESERVE + 1);
+  if (over > 0) {
+    int limit = over >= 2 ? PRESENT_CATCHUP_BURST_VBLANKS : PRESENT_CATCHUP_VBLANKS;
+    if (++present_over >= limit) {
       dropped = ready_trim_locked(depth - 1);
       present_over = 0;
     }
@@ -468,10 +595,11 @@ static void present_vblank(void) {
   vitastats_frame_presented(pipeline_us, draw_start_us - decoded_us, shown_us - draw_start_us);
   __atomic_fetch_add(&frame_count, 1, __ATOMIC_RELAXED);
 
-  // Quick to follow a slow frame, slow to relax
+  // Follows a slow frame by half the excess, so one outlier (the first frame's
+  // glyphs) doesn't hold the margin up for long; relaxes slowly
   uint32_t draw_us = (uint32_t)(shown_us - draw_start_us);
   if (draw_us > present_draw_est_us) {
-    present_draw_est_us = draw_us;
+    present_draw_est_us += (draw_us - present_draw_est_us + 1) / 2;
   } else {
     present_draw_est_us -= (present_draw_est_us - draw_us) / 16;
   }
@@ -527,6 +655,7 @@ static int vita_presenter_thread_main(SceSize args, void *argp) {
 }
 
 static int vita_pacer_thread_main(SceSize args, void *argp) {
+  vita_debug_log_thread("frame pacer");
   // 1s
   int wait = 1000000;
   //float max_fps = 0;
@@ -604,7 +733,12 @@ static void vita_cleanup() {
       // wait 10sec
       SceUInt timeout = 10000000;
       int ret;
-      sceKernelWaitThreadEnd(presenter_thread, &ret, &timeout);
+      int wait_ret = sceKernelWaitThreadEnd(presenter_thread, &ret, &timeout);
+      if (wait_ret < 0) {
+        // Still running, and may draw: the textures must outlive it
+        vita_debug_log("presenter thread didn't stop (0x%x), keeping the frame textures\n", wait_ret);
+        presenter_stuck = true;
+      }
       sceKernelDeleteThread(presenter_thread);
       presenter_thread = -1;
     }
@@ -655,12 +789,13 @@ static void vita_cleanup() {
   if (video_status == INIT_FRAMEBUFFER) {
     // Make sure the GPU is no longer reading the textures before freeing them
     vita2d_wait_rendering_done();
-    for (int i = 0; i < FRAME_TEXTURE_MAX; i++) {
+    for (int i = 0; i < FRAME_TEXTURE_MAX && !presenter_stuck; i++) {
       if (frame_textures[i] != NULL) {
         vita2d_free_texture(frame_textures[i]);
         frame_textures[i] = NULL;
       }
     }
+    presenter_stuck = false;
     queue_reset(false);
 
     if (decoder_buffer != NULL) {
@@ -683,6 +818,9 @@ static int vita_setup(int videoFormat, int width, int height, int redrawRate, vo
   __atomic_store_n(&keyframe_state, KEYFRAME_OK, __ATOMIC_RELEASE);
   stream_hint_start_us = 0;
   vitastats_reset();
+  decodes_without_output = 0;
+  worst_output_lag = 0;
+  recovery_output_pending = false;
   decode_yuv = config.decode_yuv;
   printf("video output: %s\n", decode_yuv ? "YUV420 (NV21), converted by the GPU" : "RGBA8888 from the decoder");
 
@@ -700,6 +838,14 @@ static int vita_setup(int videoFormat, int width, int height, int redrawRate, vo
   // The first frame waits for a second for as long as a stream frame lasts, in refreshes
   present_hold_max = config.stream.fps > 0 ? (int)(refresh_hz / config.stream.fps + 0.5f) : 1;
   present_hold_max = present_hold_max < 1 ? 1 : (present_hold_max > 4 ? 4 : present_hold_max);
+  held_slot = -1;
+  if (presenter_enabled) {
+    // Only vitavideo_start() lets the presenter draw (frames decoded before it
+    // wait in the queue)
+    pthread_mutex_lock(&present_mutex);
+    active_video_thread = false;
+    pthread_mutex_unlock(&present_mutex);
+  }
   queue_reset(true);
   printf("display refresh %.3f Hz (%u us), frame pacing %s\n", refresh_hz, display_period_us,
          presenter_enabled ? "Smooth" : "Off");
@@ -764,7 +910,14 @@ static int vita_setup(int videoFormat, int width, int height, int redrawRate, vo
     init->size = sizeof(SceVideodecQueryInitInfoHwAvcdec);
     init->horizontal = VITA_DECODER_RESOLUTION(width);
     init->vertical = VITA_DECODER_RESOLUTION(height);
-    init->numOfRefFrames = 4;
+    init->numOfRefFrames = vita_pick_ref_frames(init->horizontal, init->vertical,
+                                                config.enable_ref_frame_invalidation);
+    sps_ref_frames = config.enable_ref_frame_invalidation ? init->numOfRefFrames : 1;
+    sps_flags = GS_SPS_BITSTREAM_FIXUP;
+    if (config.enable_ref_frame_invalidation && config.rfi_min_dpb_hint) {
+      sps_flags |= GS_SPS_RFI_MIN_DPB_HINT;
+      printf("reference frame invalidation: telling the decoder its DPB is one frame (rfi_min_dpb_hint)\n");
+    }
     init->numOfStreams = 1;
 
     ret = sceVideodecInitLibrary(SCE_VIDEODEC_TYPE_HW_AVCDEC, init);
@@ -809,7 +962,7 @@ static int vita_setup(int videoFormat, int width, int height, int redrawRate, vo
 
     size_t sz = (decoder_info_out.frameMemSize + 0xFFFFF) & ~0xFFFFF;
     decoder->frameBuf.size = sz;
-    printf("allocating size 0x%x\n", sz);
+    printf("allocating size 0x%x (%u KiB) for %u reference frames\n", sz, (unsigned)(sz / 1024), decoder_info->numOfRefFrames);
 
     decoderblock = sceKernelAllocMemBlock("decoder", SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_NC_RW, sz, NULL);
     if (decoderblock < 0) {
@@ -842,7 +995,7 @@ static int vita_setup(int videoFormat, int width, int height, int redrawRate, vo
 
   if (video_status == INIT_AVC_DEC) {
     // INIT_FRAME_PACER_THREAD
-    ret = sceKernelCreateThread("frame_pacer", vita_pacer_thread_main, 0, 0x10000, 0, 0, NULL);
+    ret = threadplan_create("frame_pacer", vita_pacer_thread_main, 0, 0x10000);
     if (ret < 0) {
       printf("sceKernelCreateThread 0x%x\n", ret);
       ret = VITA_VIDEO_ERROR_CREATE_PACER_THREAD;
@@ -857,8 +1010,8 @@ static int vita_setup(int videoFormat, int width, int height, int redrawRate, vo
   if (video_status == INIT_FRAME_PACER_THREAD) {
     // INIT_PRESENTER_THREAD
     if (presenter_enabled) {
-      ret = sceKernelCreateThread("video_presenter", vita_presenter_thread_main, PRESENTER_THREAD_PRIORITY,
-                                  PRESENTER_STACK_SIZE, 0, 0, NULL);
+      ret = threadplan_create(PRESENTER_THREAD_NAME, vita_presenter_thread_main, PRESENTER_THREAD_PRIORITY,
+                              PRESENTER_STACK_SIZE);
       if (ret < 0) {
         printf("sceKernelCreateThread 0x%x\n", ret);
         ret = VITA_VIDEO_ERROR_CREATE_PRESENTER_THREAD;
@@ -953,7 +1106,7 @@ static int vita_submit_decode_unit(PDECODE_UNIT decodeUnit) {
   uint32_t length = 0;
   while (entry != NULL) {
     if (entry->bufferType == BUFFER_TYPE_SPS) {
-      gs_sps_fix(entry, GS_SPS_BITSTREAM_FIXUP, decoder_buffer, &length);
+      gs_sps_fix(entry, sps_flags, decoder_buffer, &length, sps_ref_frames);
     } else {
       memcpy(decoder_buffer+length, entry->data, entry->length);
       length += entry->length;
@@ -974,7 +1127,10 @@ static int vita_submit_decode_unit(PDECODE_UNIT decodeUnit) {
   int slot = -1;
   vita2d_texture *target;
   if (presenter_enabled) {
-    slot = slot_acquire();
+    // The slot an earlier unit that produced no picture was decoded into, if any
+    // (still DECODING), else a new one
+    slot = held_slot >= 0 ? held_slot : slot_acquire();
+    held_slot = -1;
     if (slot < 0) {
       return DR_NEED_IDR;
     }
@@ -1019,10 +1175,29 @@ static int vita_submit_decode_unit(PDECODE_UNIT decodeUnit) {
 
   if (array_picture.numOfOutput != 1) {
     //printf("numOfOutput %d\n", array_picture.numOfOutput);
+    // The decoder holds this picture back. Its output may come with a later unit, so
+    // carry the resume keyframe's flag to that
+    decodes_without_output++;
+    if (recovery_keyframe) {
+      recovery_output_pending = true;
+    }
     if (slot >= 0) {
-      slot_release(slot);
+      // Nothing was written yet. The next unit decodes into the same slot, so
+      // the decoder's target only moves once a picture comes out (as with
+      // back_texture_idx when frame pacing is Off)
+      held_slot = slot;
     }
     return DR_OK;
+  }
+  if (decodes_without_output > worst_output_lag) {
+    worst_output_lag = decodes_without_output;
+    vita_debug_log("decoder output lags input by %d frame(s) (ref frames %d)\n",
+                   decodes_without_output, sps_ref_frames);
+  }
+  decodes_without_output = 0;
+  if (recovery_output_pending) {
+    recovery_keyframe = true;
+    recovery_output_pending = false;
   }
 
   if (presenter_enabled) {
@@ -1163,8 +1338,9 @@ void vitavideo_start() {
   active_video_thread = true;
   pthread_mutex_unlock(&present_mutex);
   if (presenter_enabled) {
-    // Frames decoded before the stream started (its first keyframe) wait in the
-    // queue; keep only the newest so the reserve starts from nothing
+    // At stream start, frames decoded before this (its first keyframe) wait in
+    // the queue; keep only the newest so the reserve starts from nothing. On a
+    // resume the queue is already empty: stop emptied it.
     pthread_mutex_lock(&queue_mutex);
     queue_open = true;
     ready_trim_locked(1);

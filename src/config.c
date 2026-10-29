@@ -117,6 +117,8 @@ static int ini_handle(void *out, const char *section, const char *name,
       config->sops = BOOL(value);
     } else if (strcmp(name, "localaudio") == 0) {
       config->localaudio = BOOL(value);
+    } else if (strcmp(name, "audio_packet_ms") == 0) {
+      config->audio_packet_ms = INT(value);
     } else if (strcmp(name, "enable_frame_pacer") == 0) {
       config->enable_frame_pacer = BOOL(value);
     } else if (strcmp(name, "frame_pacing") == 0) {
@@ -131,6 +133,8 @@ static int ini_handle(void *out, const char *section, const char *name,
       config->disable_powersave = BOOL(value);
     } else if (strcmp(name, "boost_clocks") == 0) {
       config->boost_clocks = BOOL(value);
+    } else if (strcmp(name, "pin_threads") == 0) {
+      config->pin_threads = BOOL(value);
     } else if (strcmp(name, "direct_decode") == 0) {
       config->direct_decode = BOOL(value);
     } else if (strcmp(name, "input_sync_to_controller") == 0) {
@@ -176,6 +180,8 @@ static int ini_handle(void *out, const char *section, const char *name,
       config->mouse_acceleration = INT(value);
     } else if (strcmp(name, "enable_ref_frame_invalidation") == 0) {
       config->enable_ref_frame_invalidation = BOOL(value);
+    } else if (strcmp(name, "rfi_min_dpb_hint") == 0) {
+      config->rfi_min_dpb_hint = BOOL(value);
     } else if (strcmp(name, "enable_remote_stream_optimization") == 0) {
       config->stream.streamingRemotely = INT(value);
     } else if (strcmp(name, "enable_vita_vblank_wait") == 0) {
@@ -240,6 +246,8 @@ bool config_save(const char* filename, PCONFIGURATION config) {
     write_config_bool(fd, "sops", config->sops);
   if (config->localaudio)
     write_config_bool(fd, "localaudio", config->localaudio);
+  if (config->audio_packet_ms != 5)
+    write_config_int(fd, "audio_packet_ms", config->audio_packet_ms);
 
   if (config->app && strcmp(config->app, "Steam") != 0)
     write_config_string(fd, "app", config->app);
@@ -252,6 +260,7 @@ bool config_save(const char* filename, PCONFIGURATION config) {
   write_config_bool(fd, "center_region_only", config->center_region_only);
   write_config_bool(fd, "disable_powersave", config->disable_powersave);
   write_config_bool(fd, "boost_clocks", config->boost_clocks);
+  write_config_bool(fd, "pin_threads", config->pin_threads);
   write_config_bool(fd, "direct_decode", config->direct_decode);
   write_config_bool(fd, "input_sync_to_controller", config->input_sync_to_controller);
   write_config_bool(fd, "developer_mode", config->developer_mode);
@@ -273,6 +282,7 @@ bool config_save(const char* filename, PCONFIGURATION config) {
 
   write_config_int(fd, "mouse_acceleration", config->mouse_acceleration);
   write_config_bool(fd, "enable_ref_frame_invalidation", config->enable_ref_frame_invalidation);
+  write_config_bool(fd, "rfi_min_dpb_hint", config->rfi_min_dpb_hint);
   write_config_int(fd, "enable_remote_stream_optimization", config->stream.streamingRemotely);
   write_config_bool(fd, "enable_vita_vblank_wait", config->enable_vita_vblank_wait);
   write_config_bool(fd, "enable_motion_controls", config->enable_motion_controls);
@@ -347,11 +357,13 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
   config->config_file = NULL;
   config->sops = true;
   config->localaudio = false;
+  config->audio_packet_ms = 5;
   config->fullscreen = true;
   config->unsupported_version = false;
   config->save_debug_log = false;
   config->disable_powersave = true;
   config->boost_clocks = true;
+  config->pin_threads = false;
   config->direct_decode = false;
   config->input_sync_to_controller = true;
   config->developer_mode = false;
@@ -394,6 +406,7 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
 
   config->mouse_acceleration = 150;
   config->enable_ref_frame_invalidation = false;
+  config->rfi_min_dpb_hint = false;
   config->enable_vita_vblank_wait = false;
   config->enable_psbutton_capture = true;
   config->enable_double_tap_sprint = false;
@@ -482,6 +495,12 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
 
   if (config->app_list_style < 0 || config->app_list_style >= APP_LIST_STYLE_COUNT) {
     config->app_list_style = APP_LIST_BOXART;
+  }
+
+  // Only the durations common-c can ask the host for
+  if (config->audio_packet_ms != 5 && config->audio_packet_ms != 10) {
+    vita_debug_log("audio_packet_ms %d not 5 or 10, using 5", config->audio_packet_ms);
+    config->audio_packet_ms = 5;
   }
 
   // Larger packets would be IP-fragmented on a standard 1500-byte MTU

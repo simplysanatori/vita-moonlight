@@ -57,6 +57,7 @@ TOGGLE(motion, config.enable_motion_controls)
 TOGGLE(sprint, config.enable_double_tap_sprint)
 TOGGLE(psbutton, config.enable_psbutton_capture)
 TOGGLE(touch_keys, config.enable_front_touchzones)
+TOGGLE(pin_threads, config.pin_threads)
 TOGGLE(direct_decode, config.direct_decode)
 
 /*
@@ -233,6 +234,17 @@ static bool packet_size_change(int step) {
   // A custom value from the config file moves to the first preset
   int next = current < 0 ? 0 : (current + step + PACKET_SIZE_COUNT) % PACKET_SIZE_COUNT;
   config.stream.packetSize = PACKET_SIZES[next];
+  return true;
+}
+
+static void audio_packet_value(char *out, size_t size) {
+  snprintf(out, size, "%d ms", config.audio_packet_ms);
+}
+
+static bool audio_packet_change(int step) {
+  (void)step;
+  // Only two choices, so either direction switches
+  config.audio_packet_ms = config.audio_packet_ms == 10 ? 5 : 10;
   return true;
 }
 
@@ -478,7 +490,8 @@ const setting_def SETTINGS[] = {
   {.tab = SETTINGS_TAB_STREAM, .kind = SETTING_TOGGLE, .flags = SETTING_NEEDS_NEW_STREAM,
    .label = "Enable reference frame invalidation", .is_on = frame_inval_on, .change = frame_inval_flip,
    .help = "Fixes glitches from lost video faster, without waiting for a whole new picture. Needs "
-      "support from your PC. If you see corrupted video that doesn't clear up, turn this off."},
+      "support from your PC, which works best with an NVIDIA graphics card. Uses more of "
+      "the Vita's memory. If you see corrupted video that doesn't clear up, turn this off."},
   {.tab = SETTINGS_TAB_STREAM, .kind = SETTING_TOGGLE, .flags = SETTING_NEEDS_NEW_STREAM,
    .label = "Enable stream optimization", .is_on = stream_optimize_on, .change = stream_optimize_flip,
    .help = "Tunes the stream for playing over the internet, away from home. Leave it off on your "
@@ -520,6 +533,11 @@ const setting_def SETTINGS[] = {
    .label = "Enable local audio", .is_on = local_audio_on, .change = local_audio_flip,
    .help = "Also plays the game's sound on your PC's speakers. Off keeps the PC quiet and sends "
       "the sound only to the Vita."},
+  {.tab = SETTINGS_TAB_STREAM, .kind = SETTING_CHOICE, .flags = SETTING_NEEDS_NEW_STREAM | SETTING_CONFIRM_STEPS,
+   .label = "Audio packet length", .value = audio_packet_value, .change = audio_packet_change,
+   .help = "How much sound each Wi-Fi packet carries. 10 ms sends half as many audio packets, "
+      "which can help on a crowded 2.4 GHz network, for 5 ms more audio delay. 5 ms has the "
+      "least delay. Older PCs that can't send 10 ms stay at 5 ms."},
 
   // System
   {.tab = SETTINGS_TAB_SYSTEM, .kind = SETTING_TOGGLE,
@@ -533,6 +551,11 @@ const setting_def SETTINGS[] = {
    .help = "Runs the Vita's processor and graphics at full speed while streaming, for smoother "
       "video and sound. Uses more battery. Turn it off to save battery if your streams "
       "already run smoothly."},
+  {.tab = SETTINGS_TAB_SYSTEM, .kind = SETTING_TOGGLE, .flags = SETTING_NEEDS_NEW_STREAM,
+   .label = "CPU core pinning", .is_on = pin_threads_on, .change = pin_threads_flip,
+   .help = "Keeps the video, sound and network work on separate processor cores. It may smooth "
+      "out stutter on a busy Wi-Fi network, or make it worse. Leave it off unless you want to "
+      "compare the two."},
   {.tab = SETTINGS_TAB_SYSTEM, .kind = SETTING_TOGGLE,
    .label = "Swap X & O for Moonlight", .is_on = jp_layout_on, .change = jp_layout_flip,
    .help = "Swaps X and O in Moonlight's own menus, so O confirms and X goes back, like on "

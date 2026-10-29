@@ -159,6 +159,11 @@ int rbsp_to_nal(const uint8_t* rbsp_buf, const int* rbsp_size, uint8_t* nal_buf,
 
         if ( ( count == 2 ) && !(rbsp_buf[i] & 0xFC) ) // HACK 0xFC
         {
+            if ( j + 1 >= *nal_size )
+            {
+                // error, not enough space for the escape byte and the byte after it
+                return -1;
+            }
             nal_buf[j] = 0x03;
             j++;
             count = 0;

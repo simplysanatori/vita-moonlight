@@ -23,6 +23,7 @@
 #include <psp2/power.h>
 #include "../config.h"
 #include "../debug.h"
+#include "../threadplan.h"
 
 enum {
   ENABLE_ALL = 0,
@@ -103,14 +104,20 @@ static void update_clocks() {
 }
 
 int vitapower_thread(SceSize args, void *argp) {
+  bool logged = false;
   while (1) {
     if (!active_power_thread) {
       sceKernelDelayThread(10 * 1000 * 1000);
       continue;
     }
+    if (!logged) {
+      vita_debug_log_thread("power");
+      logged = true;
+    }
     if (powermode & DISABLE_SUSPEND) {
       sceKernelPowerTick(SCE_KERNEL_POWER_TICK_DISABLE_AUTO_SUSPEND);
       sceKernelPowerTick(SCE_KERNEL_POWER_TICK_DISABLE_OLED_OFF);
+      sceKernelPowerTick(SCE_KERNEL_POWER_TICK_DISABLE_OLED_DIMMING);
     }
     if (!scePowerIsBatteryCharging() && scePowerIsLowBattery()) {
       // TODO print warning message
@@ -123,7 +130,7 @@ int vitapower_thread(SceSize args, void *argp) {
 
 bool vitapower_init() {
   pthread_mutex_init(&clocks_mutex, NULL);
-  SceUID thid = sceKernelCreateThread("vitapower_thread", vitapower_thread, 0x10000100, 0x40000, 0, 0, NULL);
+  SceUID thid = threadplan_create("vitapower_thread", vitapower_thread, 0x10000100, 0x40000);
   if (thid >= 0)
     sceKernelStartThread(thid, 0, NULL);
 

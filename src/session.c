@@ -8,6 +8,7 @@
 #include "video.h"
 #include "power/vita.h"
 #include "input/vita.h"
+#include "audio/vita.h"
 
 #include "client.h"
 #include "errors.h"
@@ -129,8 +130,13 @@ static int start_stream(int appId, char *err, size_t err_len) {
   // Si se seleccionó una resolución específica, se mantiene; si es -1, se deja al host
   // (No se modifica config.stream.width/height aquí)
 
+  // Clamp so a bad config value cannot overflow the microsecond conversion below
   int reorder_wait_ms = config.video_reorder_wait_ms < 0 ? 0 : config.video_reorder_wait_ms;
+  if (reorder_wait_ms > 200)
+    reorder_wait_ms = 200;
   LiSetVideoReorderWaitUs((uint32_t)reorder_wait_ms * 1000);
+
+  vitaaudio_set_packet_ms(config.audio_packet_ms);
 
   vita_debug_log("Running LiStartConnection...");
   ret = LiStartConnection(&server.serverInfo, &config.stream, &connection_callbacks,

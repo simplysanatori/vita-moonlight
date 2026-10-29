@@ -53,6 +53,7 @@ typedef struct _CONFIGURATION {
   char key_dir[4096];
   bool sops;
   bool localaudio;
+  int audio_packet_ms; // 5 (default) or 10; longer packets mean fewer of them on the air
   bool fullscreen;
   bool forcehw;
   bool unsupported_version;
@@ -61,6 +62,7 @@ typedef struct _CONFIGURATION {
   struct special_keys special_keys;
   bool disable_powersave;
   bool boost_clocks;
+  bool pin_threads; // pin the receive, decode and audio threads to their own cores (threadplan.c)
   bool direct_decode; // decode on common-c's receive thread, as before the decode thread
   bool input_sync_to_controller; // pace input reads to controller samples instead of 2 ms polling
   // Developer options, shown in Settings after L + R + triangle
@@ -96,6 +98,9 @@ typedef struct _CONFIGURATION {
   int inputsCount;
   int mouse_acceleration;
   bool enable_ref_frame_invalidation;
+  // Advanced, ini only: with reference frame invalidation, tell the decoder the
+  // DPB is one frame (see GS_SPS_RFI_MIN_DPB_HINT)
+  bool rfi_min_dpb_hint;
   bool enable_vita_vblank_wait;
   bool enable_motion_controls; //Metalface
   bool enable_psbutton_capture;

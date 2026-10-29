@@ -5,6 +5,7 @@
 #include "Limelight.h"
 #include "motion.h"
 #include "../debug.h"
+#include "../threadplan.h"
 #include "vita.h"
 
 #include "psp2/power.h"
@@ -15,6 +16,22 @@
 static uint32_t MOTION_SCALE = 28;
 
 bool active_motion_threads = false;
+
+// The host picks the report rate, so it can ask for more than the loops below
+// can sleep for: 1000/rate is 0 above 1000 Hz, and the thread would spin.
+// Nothing sensible needs more than 500 reports a second from a Vita, so a
+// host asking for 1000 Hz gets 500 Hz. Rates are no longer rounded to whole
+// milliseconds either: 60 Hz is a 16666 us period, not 16000 us.
+#define MOTION_MIN_PERIOD_US 2000
+#define MOTION_MAX_PERIOD_US 1000000
+
+static SceUInt motion_period_us(uint16_t rate) {
+  if (rate == 0) {
+    return MOTION_MAX_PERIOD_US;
+  }
+  SceUInt period = 1000000 / rate;
+  return period < MOTION_MIN_PERIOD_US ? MOTION_MIN_PERIOD_US : period;
+}
 
 motion_data_state motion_state = {
     .motion_type_gyro_enabled = 0,
@@ -28,14 +45,14 @@ bool vita_motion_init() {
     sceMotionStartSampling();
     sceMotionReset();
 
-    SceUID thid = sceKernelCreateThread("vitainput_motion_gyro_thread", vitainput_motion_gyro_thread, 0, 0x40000, 0, 0, NULL);
+    SceUID thid = threadplan_create("vitainput_motion_gyro_thread", vitainput_motion_gyro_thread, 0, 0x40000);
     if (thid >= 0) {
         sceKernelStartThread(thid, 0, NULL);
     } else {
       return false;
     }
 
-    thid = sceKernelCreateThread("vitainput_motion_accel_thread", vitainput_motion_accel_thread, 0, 0x40000, 0, 0, NULL);
+    thid = threadplan_create("vitainput_motion_accel_thread", vitainput_motion_accel_thread, 0, 0x40000);
     if (thid >= 0) {
         sceKernelStartThread(thid, 0, NULL);
         return true;
@@ -45,8 +62,13 @@ bool vita_motion_init() {
 }
 
 int vitainput_motion_gyro_thread(SceSize args, void *argp) {
+  bool logged = false;
   while (1) {
     if (motion_state.motion_type_gyro_enabled == true && active_motion_threads == true) {
+      if (!logged) {
+        vita_debug_log_thread("motion gyro");
+        logged = true;
+      }
       motion_process_gyro();
 
       //TODO: Reporting battery events more than one time per second seems unwise
@@ -66,21 +88,26 @@ int vitainput_motion_gyro_thread(SceSize args, void *argp) {
     } else {
       sceKernelDelayThread(1000000);
     }
-    sceKernelDelayThread((1000/motion_state.report_rate_gyro) * 1000);
+    sceKernelDelayThread(motion_period_us(motion_state.report_rate_gyro));
   }
   
   return 0;
 }
 
 int vitainput_motion_accel_thread(SceSize args, void *argp) {
+  bool logged = false;
   while (1) {
     if (motion_state.motion_type_accel_enabled == true && active_motion_threads == true) {
+      if (!logged) {
+        vita_debug_log_thread("motion accel");
+        logged = true;
+      }
       motion_process_accel();
     } else {
       sceKernelDelayThread(1000000);
     }
 
-    sceKernelDelayThread((1000/motion_state.report_rate_accel) * 1000);
+    sceKernelDelayThread(motion_period_us(motion_state.report_rate_accel));
   }
 
   return 0;
