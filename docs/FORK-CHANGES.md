@@ -92,7 +92,7 @@ Behind a hidden **developer mode** (hold L and R, press △ in Settings):
 ## Main findings
 
 - **Latency budget:** the Vita side is ~5 ms per frame (receive ~2.4, decode 2.4 with YUV, draw 0.2). Most of the end-to-end lag is the PC's (~60 ms) and, on the bench page, the browser's (~80-100 ms). A stream at 50 fps on a 60 Hz desktop costs ~30 ms.
-- **vita2d presents with `NEXTFRAME`:** every frame waits for the next refresh (median ~6.5 ms), and ~18% of drawn frames were replaced before ever being shown. None of the earlier timings included this wait. Unaddressed; candidates are a vblank-aligned presenter or immediate flips.
+- **vita2d presents with `NEXTFRAME`:** every frame waits for the next refresh (median ~6.5 ms), and ~18% of drawn frames were replaced before ever being shown. None of the earlier timings included this wait. Addressed by **Frame pacing: Smooth** (a vblank-locked presenter thread with a one-frame queue, on by default, about +17 ms of latency; Off keeps the old behaviour). Unmeasured on the device so far: compare the overlay's shown/repeat/drop counters.
 - **Bitrate:** right by the access point the Wi-Fi carried ~31 Mbps without loss. Higher bitrate costs latency (~0.4 ms per Mbps by the AP, more at a weaker signal). On the 960x544 panel, 540p and 720p look alike at the same bitrate, and quality stops improving at ~15-20 Mbps. 720p at 10 Mbps makes the PC drop frames on busy content.
 - **The "missing frames" were mostly reorder freezes,** fixed by #15. RFI isn't offered by Sunshine with Intel Arc QSV H.264, so each abandoned frame cost a ~13-frame wait for a keyframe.
 - **Battery** (10 min each, stress page): Balanced 426 mA, Lowest delay 378 mA, Battery life 312 mA (~5 h against ~7 h).

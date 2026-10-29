@@ -28,7 +28,7 @@
 #include <psp2/power.h>
 #include <vita2d.h>
 
-#define STATS_LINE_COUNT 10
+#define STATS_LINE_COUNT 11
 #define STATS_LINE_LENGTH 80
 #define STATS_FONT_SIZE 16
 #define STATS_LINE_HEIGHT 18
@@ -48,6 +48,12 @@ typedef struct {
   uint32_t frames_received;
   uint32_t frames_rendered;
   uint32_t frames_dropped_by_pacer;
+  // Counted by the presenter, which only runs with frame pacing Smooth
+  uint32_t presenter_vblanks;
+  uint32_t presenter_repeats;
+  uint32_t frames_dropped_by_presenter;
+  uint64_t queue_depth_sum;
+  uint32_t queue_depth_max;
   uint32_t frames_lost;
   uint32_t idr_frames;
   uint64_t bytes;
@@ -55,6 +61,8 @@ typedef struct {
   timing queue;
   timing decode;
   timing render;
+  // How long a decoded frame waited in the presenter's queue
+  timing queue_wait;
   timing host;
   // Host + receive + queue + decode + render for each frame that reached the screen
   timing pipeline;
@@ -182,6 +190,50 @@ void vitastats_frame_dropped_by_pacer(void) {
   pthread_mutex_unlock(&stats_mutex);
 }
 
+uint64_t vitastats_frame_pipeline_us(void) {
+  pthread_mutex_lock(&stats_mutex);
+  uint64_t us = frame_pipeline_us;
+  pthread_mutex_unlock(&stats_mutex);
+  return us;
+}
+
+void vitastats_frame_presented(uint64_t pipeline_us, uint64_t wait_us, uint64_t render_us) {
+  if (!stats_active()) {
+    return;
+  }
+  pthread_mutex_lock(&stats_mutex);
+  current.frames_rendered++;
+  timing_add(&current.queue_wait, wait_us);
+  timing_add(&current.render, render_us);
+  timing_add(&current.pipeline, pipeline_us + wait_us + render_us);
+  pthread_mutex_unlock(&stats_mutex);
+}
+
+void vitastats_presenter_vblank(bool presented, int queue_depth) {
+  if (!stats_active()) {
+    return;
+  }
+  pthread_mutex_lock(&stats_mutex);
+  current.presenter_vblanks++;
+  if (!presented) {
+    current.presenter_repeats++;
+  }
+  current.queue_depth_sum += queue_depth;
+  if ((uint32_t)queue_depth > current.queue_depth_max) {
+    current.queue_depth_max = queue_depth;
+  }
+  pthread_mutex_unlock(&stats_mutex);
+}
+
+void vitastats_frame_dropped_by_presenter(void) {
+  if (!stats_active()) {
+    return;
+  }
+  pthread_mutex_lock(&stats_mutex);
+  current.frames_dropped_by_presenter++;
+  pthread_mutex_unlock(&stats_mutex);
+}
+
 void vitastats_tick(void) {
   uint64_t now_us = LiGetMicroseconds();
 
@@ -261,6 +313,15 @@ void vitastats_tick(void) {
   snprintf(new_lines[n++], STATS_LINE_LENGTH, "Net %.1f/%.1f ms  Queue %.1f/%.1f ms (%d)",
            timing_avg_ms(&w.network), timing_max_ms(&w.network),
            timing_avg_ms(&w.queue), timing_max_ms(&w.queue), pending_frames);
+  if (w.presenter_vblanks > 0) {
+    // Frames shown, refreshes that repeated the last frame, frames thrown away to
+    // catch up, and how many were waiting at each refresh
+    snprintf(new_lines[n++], STATS_LINE_LENGTH, "Smooth: shown %u  repeat %u  drop %u  queue %.1f/%u  wait %.1f ms",
+             w.presenter_vblanks - w.presenter_repeats, w.presenter_repeats, w.frames_dropped_by_presenter,
+             (float)w.queue_depth_sum / w.presenter_vblanks, w.queue_depth_max, timing_avg_ms(&w.queue_wait));
+  } else {
+    snprintf(new_lines[n++], STATS_LINE_LENGTH, "Frame pacing off: frames drawn as they are decoded");
+  }
   snprintf(new_lines[n++], STATS_LINE_LENGTH, "Decode %.1f/%.1f ms  Render %.1f/%.1f ms",
            timing_avg_ms(&w.decode), timing_max_ms(&w.decode),
            timing_avg_ms(&w.render), timing_max_ms(&w.render));
@@ -293,7 +354,8 @@ void vitastats_tick(void) {
     vita_debug_log("[STATS] latency %.1f/%.1f fps rx %.1f drawn %.1f pacer_drop %u lost %u idr %u mbps %.2f "
                    "net %.1f/%.1f queue %.1f/%.1f decode %.1f/%.1f render %.1f/%.1f host %.1f "
                    "rtt %u/%u fec_rec %u fec_fail %u oos %u pending %d audio_pending %d audio_drop %u "
-                   "rssi %d%% ch %d overlay %.2f",
+                   "rssi %d%% ch %d overlay %.2f present_vblanks %u present_repeat %u present_drop %u "
+                   "queue_avg %.2f queue_max %u queue_wait %.1f/%.1f",
                    latency_ms, latency_max_ms,
                    received_fps, drawn_fps, w.frames_dropped_by_pacer, w.frames_lost, w.idr_frames, mbps,
                    timing_avg_ms(&w.network), timing_max_ms(&w.network),
@@ -303,7 +365,10 @@ void vitastats_tick(void) {
                    timing_avg_ms(&w.host), rtt_ms, rtt_var_ms,
                    fec_recovered, fec_failed, out_of_sequence, pending_frames,
                    LiGetPendingAudioDuration(), vitaaudio_dropped_packets(),
-                   rssi_percent, channel, timing_avg_ms(&w.overlay));
+                   rssi_percent, channel, timing_avg_ms(&w.overlay),
+                   w.presenter_vblanks, w.presenter_repeats, w.frames_dropped_by_presenter,
+                   w.presenter_vblanks ? (float)w.queue_depth_sum / w.presenter_vblanks : 0.0f,
+                   w.queue_depth_max, timing_avg_ms(&w.queue_wait), timing_max_ms(&w.queue_wait));
   }
 }
 

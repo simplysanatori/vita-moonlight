@@ -119,6 +119,10 @@ static int ini_handle(void *out, const char *section, const char *name,
       config->localaudio = BOOL(value);
     } else if (strcmp(name, "enable_frame_pacer") == 0) {
       config->enable_frame_pacer = BOOL(value);
+    } else if (strcmp(name, "frame_pacing") == 0) {
+      config->frame_pacing = INT(value);
+    } else if (strcmp(name, "present_margin_us") == 0) {
+      config->present_margin_us = INT(value);
     } else if (strcmp(name, "video_reorder_wait_ms") == 0) {
       config->video_reorder_wait_ms = INT(value);
     } else if (strcmp(name, "center_region_only") == 0) {
@@ -242,6 +246,8 @@ bool config_save(const char* filename, PCONFIGURATION config) {
 
   write_config_string(fd, "key_dir", config->key_dir); // Guardar key_dir en la raíz
   write_config_bool(fd, "enable_frame_pacer", config->enable_frame_pacer);
+  write_config_int(fd, "frame_pacing", config->frame_pacing);
+  write_config_int(fd, "present_margin_us", config->present_margin_us);
   write_config_int(fd, "video_reorder_wait_ms", config->video_reorder_wait_ms);
   write_config_bool(fd, "center_region_only", config->center_region_only);
   write_config_bool(fd, "disable_powersave", config->disable_powersave);
@@ -365,6 +371,13 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
   // Off by default: it counts frames in ~1 s windows and drops any excess, so jitter
   // around 60 fps periodically discards a decoded frame and causes a visible hitch
   config->enable_frame_pacer = false;
+  // One frame per refresh from a small queue, so a burst of frames after a
+  // Wi-Fi stall plays out instead of being collapsed into one. Costs about one
+  // frame of latency; Off draws every frame as soon as it is decoded.
+  config->frame_pacing = FRAME_PACING_SMOOTH;
+  // Drawing and swapping takes ~2-4 ms, so it starts this long before the refresh
+  // it is aimed at. The presenter raises it if drawing takes longer.
+  config->present_margin_us = 4000;
   // On the Vita's Wi-Fi ~10% of video packets can arrive out of order at a
   // weaker signal; waiting for them saves frames that would otherwise freeze
   // the picture until a keyframe. At ~60% signal, 720p 20 Mbps: 23-37
@@ -442,6 +455,14 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
 
   if (config->bench_seconds < BENCH_MIN_SECONDS || config->bench_seconds > BENCH_MAX_SECONDS) {
     config->bench_seconds = BENCH_DEFAULT_SECONDS;
+  }
+
+  if (config->frame_pacing < 0 || config->frame_pacing >= FRAME_PACING_COUNT) {
+    config->frame_pacing = FRAME_PACING_SMOOTH;
+  }
+
+  if (config->present_margin_us < 1000 || config->present_margin_us > 12000) {
+    config->present_margin_us = 4000;
   }
 
   if (config->stats_overlay < STATS_OVERLAY_OFF || config->stats_overlay >= STATS_OVERLAY_COUNT) {

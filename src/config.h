@@ -81,7 +81,12 @@ typedef struct _CONFIGURATION {
   bool jp_layout;
   int stats_overlay; // STATS_OVERLAY_* from stats.h
   int app_list_style; // APP_LIST_* below
+  // The old pacer: drops frames when more than the FPS setting arrive in a
+  // second. Only used with frame_pacing off.
   bool enable_frame_pacer;
+  int frame_pacing; // FRAME_PACING_* below
+  // How long before each refresh the presenter starts drawing, in microseconds
+  int present_margin_us;
   // How long to hold the next frame's packets while the current one is
   // incomplete, in case its late packets arrive (0 gives up immediately)
   int video_reorder_wait_ms;
@@ -109,6 +114,13 @@ typedef struct _CONFIGURATION {
   int controller_type; // 1: Xbox, 2: PS (default), 3: Nintendo, 4: Generic
   bool swap_shoulder_buttons; // Nuevo: swap R1/L1 <-> R2/L2
 } CONFIGURATION, *PCONFIGURATION;
+
+// Values for config.frame_pacing: how decoded frames reach the screen
+enum {
+  FRAME_PACING_OFF = 0,    // each frame is drawn as soon as it is decoded (lowest latency)
+  FRAME_PACING_SMOOTH = 1, // one frame per refresh from a queue with a one frame reserve
+  FRAME_PACING_COUNT
+};
 
 // Values for config.app_list_style: how a PC's games and apps are listed
 enum {

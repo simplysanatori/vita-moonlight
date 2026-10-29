@@ -26,6 +26,10 @@
 #define VITA_DECODER_RESOLUTION_LOWER_BOUND(x)  ((x) < 64 ? 64 : (x))
 #define VITA_DECODER_RESOLUTION(x)              (VITA_DECODER_RESOLUTION_LOWER_BOUND(ROUND_NEAREST_16(x)))
 
+#include <stdbool.h>
+
+// Creates the locks the video code uses. Call once at startup.
+bool vitavideo_init(void);
 void vitavideo_start();
 void vitavideo_stop();
 void vitavideo_show_poor_net_indicator();

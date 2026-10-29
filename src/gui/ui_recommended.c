@@ -160,17 +160,19 @@ static void apply(int connection) {
   config.stream.fps = p.fps;
   config.stream.bitrate = p.bitrate_kbps;
   config.boost_clocks = p.boost_clocks;
-  // The lowest-latency choices, whatever else
+  // The lowest-latency choices, whatever else, except that smooth pacing costs a
+  // frame of delay which only Lowest delay refuses
   config.enable_frame_pacer = false;
   config.enable_vita_vblank_wait = false;
+  config.frame_pacing = priority == PRIORITY_DELAY ? FRAME_PACING_OFF : FRAME_PACING_SMOOTH;
 }
 
 static void show_applied(int connection) {
   preset p = choose(connection);
   char what[128];
   describe(&p, what, sizeof(what));
-  display_error("Applied %s for %s: %s, frame pacer and V-Sync off.", PRIORITY_NAMES[priority],
-                connection_name(connection), what);
+  display_error("Applied %s for %s: %s, V-Sync off, frame pacing %s.", PRIORITY_NAMES[priority],
+                connection_name(connection), what, config.frame_pacing == FRAME_PACING_SMOOTH ? "smooth" : "off");
 }
 
 // Shows the live reading and the priority, and marks the choice that fits

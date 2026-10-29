@@ -187,6 +187,7 @@ int ui_connect_loop(int id, void *context, const input_data *input) {
             // The covers drawn this frame stay in memory until the menu closes
             ui_boxart_stop_loading();
             sceKernelDelayThread(500 * 1000);
+            ui_end();
             connection_resume();
             break;
           }

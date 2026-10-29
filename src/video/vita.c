@@ -36,6 +36,7 @@
 #include <psp2/display.h>
 #include <psp2/videodec.h>
 #include <vita2d.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -60,6 +61,7 @@ enum {
   VITA_VIDEO_ERROR_GET_MEMBASE          = 0x80010005,
   VITA_VIDEO_ERROR_CREATE_DEC           = 0x80010006,
   VITA_VIDEO_ERROR_CREATE_PACER_THREAD  = 0x80010007,
+  VITA_VIDEO_ERROR_CREATE_PRESENTER_THREAD = 0x80010008,
 };
 
 #define DECODER_BUFFER_SIZE (128 * 1024)
@@ -89,14 +91,18 @@ enum VideoStatus {
   INIT_DECODER_MEMBLOCK,
   INIT_AVC_DEC,
   INIT_FRAME_PACER_THREAD,
+  INIT_PRESENTER_THREAD,
 };
 
-// Two textures so the hardware decoder can write the next frame while the GPU
-// is still reading the previous one
-#define FRAME_TEXTURE_COUNT 2
-static vita2d_texture *frame_textures[FRAME_TEXTURE_COUNT] = {NULL};
-// The texture the next frame is decoded into. The other one may still be
-// queued for display.
+// Textures the hardware decoder writes frames into. With frame pacing Off two
+// are enough, so it can write the next frame while the GPU is still reading the
+// previous one. Smooth needs four, see the presenter below.
+#define FRAME_TEXTURE_MAX 4
+#define FRAME_TEXTURE_OFF_COUNT 2
+static vita2d_texture *frame_textures[FRAME_TEXTURE_MAX] = {NULL};
+static int frame_texture_count = FRAME_TEXTURE_OFF_COUNT;
+// Frame pacing Off: the texture the next frame is decoded into. The other one
+// may still be queued for display.
 static int back_texture_idx = 0;
 enum VideoStatus video_status = NOT_INIT;
 
@@ -104,6 +110,7 @@ SceAvcdecCtrl *decoder = NULL;
 SceUID displayblock = -1;
 SceUID decoderblock = -1;
 SceUID pacer_thread = -1;
+SceUID presenter_thread = -1;
 SceVideodecQueryInitInfoHwAvcdec *init = NULL;
 SceAvcdecQueryDecoderInfo *decoder_info = NULL;
 
@@ -114,6 +121,9 @@ typedef struct {
 } indicator_status;
 
 //static unsigned numframes;
+// Whether the stream may draw: false while the pause menu (or anything else)
+// owns vita2d. Written under present_mutex, which is how stopping it waits out
+// a frame being drawn.
 static bool active_video_thread = true;
 static bool active_pacer_thread = false;
 static indicator_status poor_net_indicator = {0};
@@ -216,6 +226,306 @@ void update_scaling_settings(int width, int height) {
   printf("update_scaling_settings: image_scaling.region_y2 = %f\n", image_scaling.region_y2);
 }
 
+/*
+ * The presenter (frame pacing Smooth)
+ *
+ * With frame pacing Off a frame is drawn and swapped the moment it is decoded,
+ * and a display refresh shows whichever was swapped last. A Wi-Fi stall followed
+ * by a burst of frames then repeats the old picture, then skips the burst's
+ * frames: about 18% of drawn frames were replaced before they were ever shown.
+ *
+ * Smooth keeps decoded frames in a small queue and a presenter thread shows
+ * exactly one per refresh, oldest first:
+ * - At the start of a stream (and after a pause) the first frame is held until a
+ *   second is queued behind it, to build a reserve of one frame, but no longer
+ *   than one stream frame lasts, so a still picture isn't held back. The reserve
+ *   then absorbs one late frame without a repeat.
+ * - Nothing queued: the last picture stays up (no swap), so nothing stalls. The
+ *   frame that was late is then shown in order, and the queue is a frame deeper.
+ * - If the queue stays past the reserve for PRESENT_CATCHUP_VBLANKS refreshes
+ *   (a burst that never drained, or the host running a hair faster than the
+ *   panel), the oldest frame is dropped: one at a time, not in a burst.
+ *
+ * The decoder (common-c's VideoDec thread) only decodes into a free texture and
+ * queues it. The presenter thread is the only thread that draws while streaming.
+ */
+
+// Frames kept queued behind the one being shown
+#define PRESENT_RESERVE 1
+// Refreshes the queue may stay beyond the reserve plus one before a frame is dropped
+#define PRESENT_CATCHUP_VBLANKS 30
+// Refreshes measured to log the panel's real rate
+#define PRESENT_RATE_SAMPLES 300
+// User thread priorities run from 64 (highest) to 191. This thread sleeps most
+// of each refresh and has a short deadline, so it ranks above the decoder.
+#define PRESENTER_THREAD_PRIORITY 70
+#define PRESENTER_STACK_SIZE 0x20000
+
+enum {
+  SLOT_FREE,      // not holding a frame
+  SLOT_DECODING,  // the decoder is writing a frame into it
+  SLOT_READY,     // decoded and queued for display
+  SLOT_SHOWING,   // the presenter is drawing it, or the GPU is still reading it
+};
+
+typedef struct {
+  int state;
+  // Host, network, queue and decode time so far, and when decoding finished,
+  // for the stats overlay
+  uint64_t pipeline_us;
+  uint64_t decoded_us;
+} frame_slot;
+
+// queue_mutex guards the slots and the queue of READY slots below, and is held
+// only briefly. present_mutex is held by whichever thread is inside a vita2d
+// scene while streaming (the presenter, or the decode thread with frame pacing
+// Off). vitavideo_stop() takes it to wait out a frame being drawn, so a thread
+// never has a scene open once the pause menu has taken over. Where both are
+// needed present_mutex is taken first.
+static pthread_mutex_t queue_mutex;
+static pthread_mutex_t present_mutex;
+static frame_slot frame_slots[FRAME_TEXTURE_MAX];
+// Slot numbers of the READY frames, oldest first
+static int ready_fifo[FRAME_TEXTURE_MAX];
+static int ready_head = 0;
+static int ready_count = 0;
+// False while paused, so a frame that finishes decoding then is thrown away
+// instead of being shown later
+static bool queue_open = false;
+
+// Fixed for a stream at setup
+static bool presenter_enabled = false;
+static bool active_presenter_thread = false;
+static uint32_t display_period_us = 16667;
+static float display_hz = 60.0f;
+static int present_margin_us = 4000;
+// Refreshes the first frame is held for while the reserve builds
+static int present_hold_max = 1;
+
+// Used only by the presenter thread
+static bool present_primed = false;
+static int present_hold = 0;
+static int present_over = 0;
+// How long drawing a frame has taken lately, to start early enough
+static uint32_t present_draw_est_us = 0;
+
+bool vitavideo_init(void) {
+  return pthread_mutex_init(&queue_mutex, NULL) == 0 && pthread_mutex_init(&present_mutex, NULL) == 0;
+}
+
+static int ready_pop_locked(void) {
+  int slot = ready_fifo[ready_head];
+  ready_head = (ready_head + 1) % FRAME_TEXTURE_MAX;
+  ready_count--;
+  return slot;
+}
+
+static void ready_push_locked(int slot) {
+  ready_fifo[(ready_head + ready_count) % FRAME_TEXTURE_MAX] = slot;
+  ready_count++;
+}
+
+// Throws away the oldest queued frames until at most keep are left
+static int ready_trim_locked(int keep) {
+  int dropped = 0;
+  while (ready_count > keep) {
+    frame_slots[ready_pop_locked()].state = SLOT_FREE;
+    dropped++;
+  }
+  return dropped;
+}
+
+static void queue_reset(bool open) {
+  pthread_mutex_lock(&queue_mutex);
+  for (int i = 0; i < FRAME_TEXTURE_MAX; i++) {
+    frame_slots[i].state = SLOT_FREE;
+  }
+  ready_head = 0;
+  ready_count = 0;
+  queue_open = open;
+  pthread_mutex_unlock(&queue_mutex);
+}
+
+// Takes a slot for the decoder to write the next frame into: a free one, or
+// else the oldest queued frame (the queue is full; the presenter is behind).
+// -1 can't happen: at most one slot is decoding and one showing, and the rest
+// are free or queued.
+static int slot_acquire(void) {
+  int slot = -1;
+  bool overflowed = false;
+  pthread_mutex_lock(&queue_mutex);
+  for (int i = 0; i < frame_texture_count; i++) {
+    if (frame_slots[i].state == SLOT_FREE) {
+      slot = i;
+      break;
+    }
+  }
+  if (slot < 0 && ready_count > 0) {
+    slot = ready_pop_locked();
+    overflowed = true;
+  }
+  if (slot >= 0) {
+    frame_slots[slot].state = SLOT_DECODING;
+  }
+  pthread_mutex_unlock(&queue_mutex);
+  if (overflowed) {
+    vita_debug_log("present queue full, dropping the oldest frame\n");
+    vitastats_frame_dropped_by_presenter();
+  }
+  return slot;
+}
+
+// Gives back a slot that didn't end up holding a frame
+static void slot_release(int slot) {
+  pthread_mutex_lock(&queue_mutex);
+  frame_slots[slot].state = SLOT_FREE;
+  pthread_mutex_unlock(&queue_mutex);
+}
+
+// Queues a decoded frame. Not queued (and false) while paused.
+static bool slot_publish(int slot, uint64_t pipeline_us, uint64_t decoded_us) {
+  pthread_mutex_lock(&queue_mutex);
+  bool open = queue_open;
+  if (open) {
+    frame_slots[slot].pipeline_us = pipeline_us;
+    frame_slots[slot].decoded_us = decoded_us;
+    frame_slots[slot].state = SLOT_READY;
+    ready_push_locked(slot);
+  } else {
+    frame_slots[slot].state = SLOT_FREE;
+  }
+  pthread_mutex_unlock(&queue_mutex);
+  return open;
+}
+
+// Called once per refresh. Decides what this refresh shows and draws it.
+static void present_vblank(void) {
+  pthread_mutex_lock(&present_mutex);
+  if (!active_video_thread) {
+    // Paused: the menu owns vita2d
+    present_primed = false;
+    present_hold = 0;
+    present_over = 0;
+    pthread_mutex_unlock(&present_mutex);
+    return;
+  }
+
+  int slot = -1;
+  int depth;
+  int dropped = 0;
+  uint64_t pipeline_us = 0;
+  uint64_t decoded_us = 0;
+  pthread_mutex_lock(&queue_mutex);
+  depth = ready_count;
+  if (depth > PRESENT_RESERVE + 1) {
+    if (++present_over >= PRESENT_CATCHUP_VBLANKS) {
+      dropped = ready_trim_locked(depth - 1);
+      present_over = 0;
+    }
+  } else {
+    present_over = 0;
+  }
+  if (ready_count > 0) {
+    // Building the reserve: wait for a second frame, but not for long
+    if (!present_primed && ready_count <= PRESENT_RESERVE && present_hold < present_hold_max) {
+      present_hold++;
+    } else {
+      slot = ready_pop_locked();
+      frame_slots[slot].state = SLOT_SHOWING;
+      pipeline_us = frame_slots[slot].pipeline_us;
+      decoded_us = frame_slots[slot].decoded_us;
+      present_primed = true;
+    }
+  }
+  pthread_mutex_unlock(&queue_mutex);
+
+  for (int i = 0; i < dropped; i++) {
+    vitastats_frame_dropped_by_presenter();
+  }
+  vitastats_presenter_vblank(slot >= 0, depth);
+  if (slot < 0) {
+    // Nothing new: no swap, so the display keeps the last picture
+    pthread_mutex_unlock(&present_mutex);
+    return;
+  }
+
+  uint64_t draw_start_us = LiGetMicroseconds();
+  vita2d_start_drawing();
+
+  draw_streaming(frame_textures[slot]);
+  draw_fps();
+  draw_indicators();
+
+  vita2d_end_drawing();
+  // The picture is complete, and the GPU done with the texture, before the
+  // display is told to show it
+  vita2d_wait_rendering_done();
+  vita2d_swap_buffers();
+  uint64_t shown_us = LiGetMicroseconds();
+  pthread_mutex_unlock(&present_mutex);
+
+  slot_release(slot);
+  vitastats_frame_presented(pipeline_us, draw_start_us - decoded_us, shown_us - draw_start_us);
+  __atomic_fetch_add(&frame_count, 1, __ATOMIC_RELAXED);
+
+  // Quick to follow a slow frame, slow to relax
+  uint32_t draw_us = (uint32_t)(shown_us - draw_start_us);
+  if (draw_us > present_draw_est_us) {
+    present_draw_est_us = draw_us;
+  } else {
+    present_draw_est_us -= (present_draw_est_us - draw_us) / 16;
+  }
+}
+
+static int vita_presenter_thread_main(SceSize args, void *argp) {
+  vita_debug_log_thread("video present");
+  present_primed = false;
+  present_hold = 0;
+  present_over = 0;
+  present_draw_est_us = 0;
+
+  uint64_t last_vblank_us = 0;
+  uint64_t rate_sum_us = 0;
+  int rate_samples = 0;
+  while (__atomic_load_n(&active_presenter_thread, __ATOMIC_ACQUIRE)) {
+    sceDisplayWaitVblankStart();
+    uint64_t vblank_us = sceKernelGetSystemTimeWide();
+
+    // Log the panel's real refresh rate once. A refresh the thread was too late
+    // for makes a double interval, which is left out.
+    if (rate_samples < PRESENT_RATE_SAMPLES) {
+      if (last_vblank_us != 0 && vblank_us - last_vblank_us < display_period_us + display_period_us / 2) {
+        rate_sum_us += vblank_us - last_vblank_us;
+        if (++rate_samples == PRESENT_RATE_SAMPLES) {
+          vita_debug_log("display refresh: reported %.3f Hz, measured %.3f Hz over %d refreshes\n",
+                         display_hz, rate_samples * 1000000.0 / rate_sum_us, rate_samples);
+        }
+      }
+      last_vblank_us = vblank_us;
+    }
+
+    // Aim the draw at the end of this refresh, so the swap lands just before the
+    // next one and the frame is up for all of it
+    uint32_t margin_us = present_margin_us;
+    if (present_draw_est_us + 1000 > margin_us) {
+      margin_us = present_draw_est_us + 1000;
+    }
+    if (margin_us + 2000 > display_period_us) {
+      margin_us = display_period_us - 2000;
+    }
+    uint64_t elapsed_us = sceKernelGetSystemTimeWide() - vblank_us;
+    if (elapsed_us + margin_us < display_period_us) {
+      sceKernelDelayThread(display_period_us - margin_us - elapsed_us);
+    }
+
+    if (!__atomic_load_n(&active_presenter_thread, __ATOMIC_ACQUIRE)) {
+      break;
+    }
+    present_vblank();
+  }
+  return 0;
+}
+
 static int vita_pacer_thread_main(SceSize args, void *argp) {
   // 1s
   int wait = 1000000;
@@ -228,24 +538,24 @@ static int vita_pacer_thread_main(SceSize args, void *argp) {
   //uint64_t last_vblank_count = sceDisplayGetVcount();
   uint64_t last_check_time = sceKernelGetSystemTimeWide();
   //float carry = 0;
-  need_drop = 0;
-  frame_count = 0;
+  __atomic_store_n(&need_drop, 0, __ATOMIC_RELAXED);
+  __atomic_store_n(&frame_count, 0, __ATOMIC_RELAXED);
   while (active_pacer_thread) {
     //uint64_t curr_vblank_count = sceDisplayGetVcount();
     //uint32_t vblank_fps = curr_vblank_count - last_vblank_count;
-    uint32_t curr_frame_count = frame_count;
-    frame_count = 0;
+    uint32_t curr_frame_count = __atomic_exchange_n(&frame_count, 0, __ATOMIC_RELAXED);
 
     if (!active_video_thread) {
     //  carry = 0;
     } else {
-      if (config.enable_frame_pacer && curr_frame_count > max_fps) {
+      // The presenter replaces this: it already shows one frame per refresh
+      if (config.enable_frame_pacer && !presenter_enabled && curr_frame_count > max_fps) {
         //carry += curr_frame_count - max_fps;
         //if (carry > 1) {
         //  need_drop += (int)carry;
         //  carry -= (int)carry;
         //}
-        need_drop += curr_frame_count - max_fps;
+        __atomic_fetch_add(&need_drop, curr_frame_count - max_fps, __ATOMIC_RELAXED);
       }
       //vita_debug_log("fps0/fps1/carry/need_drop: %u/%u/%f/%u\n",
       //               curr_frame_count, vblank_fps, carry, need_drop);
@@ -287,6 +597,20 @@ static int vita_pacer_thread_main(SceSize args, void *argp) {
 }
 
 static void vita_cleanup() {
+  if (video_status == INIT_PRESENTER_THREAD) {
+    // First: nothing may draw once the textures are freed below
+    if (presenter_thread >= 0) {
+      __atomic_store_n(&active_presenter_thread, false, __ATOMIC_RELEASE);
+      // wait 10sec
+      SceUInt timeout = 10000000;
+      int ret;
+      sceKernelWaitThreadEnd(presenter_thread, &ret, &timeout);
+      sceKernelDeleteThread(presenter_thread);
+      presenter_thread = -1;
+    }
+    video_status--;
+  }
+
   if (video_status == INIT_FRAME_PACER_THREAD) {
     active_pacer_thread = false;
     // wait 10sec
@@ -331,12 +655,13 @@ static void vita_cleanup() {
   if (video_status == INIT_FRAMEBUFFER) {
     // Make sure the GPU is no longer reading the textures before freeing them
     vita2d_wait_rendering_done();
-    for (int i = 0; i < FRAME_TEXTURE_COUNT; i++) {
+    for (int i = 0; i < FRAME_TEXTURE_MAX; i++) {
       if (frame_textures[i] != NULL) {
         vita2d_free_texture(frame_textures[i]);
         frame_textures[i] = NULL;
       }
     }
+    queue_reset(false);
 
     if (decoder_buffer != NULL) {
       free(decoder_buffer);
@@ -361,6 +686,24 @@ static int vita_setup(int videoFormat, int width, int height, int redrawRate, vo
   decode_yuv = config.decode_yuv;
   printf("video output: %s\n", decode_yuv ? "YUV420 (NV21), converted by the GPU" : "RGBA8888 from the decoder");
 
+  // The benchmark times a frame from decode to draw, which a queue would blur
+  presenter_enabled = config.frame_pacing == FRAME_PACING_SMOOTH && !vitabench_active();
+  frame_texture_count = presenter_enabled ? FRAME_TEXTURE_MAX : FRAME_TEXTURE_OFF_COUNT;
+  float refresh_hz = 0;
+  if (sceDisplayGetRefreshRate(&refresh_hz) < 0 || refresh_hz < 30.0f || refresh_hz > 120.0f) {
+    printf("display refresh rate unavailable or odd (%f), assuming 60 Hz\n", refresh_hz);
+    refresh_hz = 60.0f;
+  }
+  display_hz = refresh_hz;
+  display_period_us = (uint32_t)(1000000.0f / refresh_hz + 0.5f);
+  present_margin_us = config.present_margin_us;
+  // The first frame waits for a second for as long as a stream frame lasts, in refreshes
+  present_hold_max = config.stream.fps > 0 ? (int)(refresh_hz / config.stream.fps + 0.5f) : 1;
+  present_hold_max = present_hold_max < 1 ? 1 : (present_hold_max > 4 ? 4 : present_hold_max);
+  queue_reset(true);
+  printf("display refresh %.3f Hz (%u us), frame pacing %s\n", refresh_hz, display_period_us,
+         presenter_enabled ? "Smooth" : "Off");
+
   if (video_status == NOT_INIT) {
     // INIT_GS
     gs_sps_init(width, height);
@@ -381,7 +724,7 @@ static int vita_setup(int videoFormat, int width, int height, int redrawRate, vo
       goto cleanup;
     }
 
-    for (int i = 0; i < FRAME_TEXTURE_COUNT; i++) {
+    for (int i = 0; i < frame_texture_count; i++) {
       // In YUV mode the decoder writes NV21 (a Y plane, then interleaved V/U,
       // so the YVU format: YUV swaps red and blue) and the GPU's texture unit
       // converts it while sampling. CSC0 is BT.601 limited range, which is
@@ -511,6 +854,23 @@ static int vita_setup(int videoFormat, int width, int height, int redrawRate, vo
     video_status++;
   }
 
+  if (video_status == INIT_FRAME_PACER_THREAD) {
+    // INIT_PRESENTER_THREAD
+    if (presenter_enabled) {
+      ret = sceKernelCreateThread("video_presenter", vita_presenter_thread_main, PRESENTER_THREAD_PRIORITY,
+                                  PRESENTER_STACK_SIZE, 0, 0, NULL);
+      if (ret < 0) {
+        printf("sceKernelCreateThread 0x%x\n", ret);
+        ret = VITA_VIDEO_ERROR_CREATE_PRESENTER_THREAD;
+        goto cleanup;
+      }
+      presenter_thread = ret;
+      __atomic_store_n(&active_presenter_thread, true, __ATOMIC_RELEASE);
+      sceKernelStartThread(presenter_thread, 0, NULL);
+    }
+    video_status++;
+  }
+
   return VITA_VIDEO_INIT_OK;
 
 cleanup:
@@ -566,12 +926,6 @@ static int vita_submit_decode_unit(PDECODE_UNIT decodeUnit) {
   picture.frame.framePitch = image_scaling.texture_width;
   picture.frame.frameWidth = image_scaling.texture_width;
   picture.frame.frameHeight = image_scaling.texture_height;
-  picture.frame.pPicture[0] = vita2d_texture_get_datap(frame_textures[back_texture_idx]);
-  if (decode_yuv) {
-    // GXM's two-plane YUV420 texture expects the V/U plane straight after Y
-    picture.frame.pPicture[1] = (uint8_t *)picture.frame.pPicture[0]
-                                + image_scaling.texture_width * image_scaling.texture_height;
-  }
 
   //ensure_buf_size((void *)&decoder_buffer, &decoder_buffer_size, decodeUnit->fullLength + 64);
 
@@ -615,6 +969,26 @@ static int vita_submit_decode_unit(PDECODE_UNIT decodeUnit) {
   au.pts.lower = 0xFFFFFFFF;
   au.pts.upper = 0xFFFFFFFF;
 
+  // The texture this frame is decoded into. With the presenter, a slot nobody
+  // is reading or has queued; otherwise the one the GPU isn't drawing from.
+  int slot = -1;
+  vita2d_texture *target;
+  if (presenter_enabled) {
+    slot = slot_acquire();
+    if (slot < 0) {
+      return DR_NEED_IDR;
+    }
+    target = frame_textures[slot];
+  } else {
+    target = frame_textures[back_texture_idx];
+  }
+  picture.frame.pPicture[0] = vita2d_texture_get_datap(target);
+  if (decode_yuv) {
+    // GXM's two-plane YUV420 texture expects the V/U plane straight after Y
+    picture.frame.pPicture[1] = (uint8_t *)picture.frame.pPicture[0]
+                                + image_scaling.texture_width * image_scaling.texture_height;
+  }
+
   int ret = 0;
   // Separates assembling the frame from the hardware decode, for the benchmark
   uint64_t hw_start_us = LiGetMicroseconds();
@@ -623,6 +997,9 @@ static int vita_submit_decode_unit(PDECODE_UNIT decodeUnit) {
   vitastats_frame_decoded(decoded_us - submit_us);
   if (ret < 0) {
     printf("sceAvcdecDecode (len=0x%x): 0x%x numOfOutput %d\n", decodeUnit->fullLength, ret, array_picture.numOfOutput);
+    if (slot >= 0) {
+      slot_release(slot);
+    }
     return DR_NEED_IDR;
   }
 
@@ -642,12 +1019,24 @@ static int vita_submit_decode_unit(PDECODE_UNIT decodeUnit) {
 
   if (array_picture.numOfOutput != 1) {
     //printf("numOfOutput %d\n", array_picture.numOfOutput);
+    if (slot >= 0) {
+      slot_release(slot);
+    }
+    return DR_OK;
+  }
+
+  if (presenter_enabled) {
+    // Queued for the presenter thread, which draws it at a refresh. Never
+    // dropped here, even a keyframe that ends a resume: the queue only ever
+    // drops its oldest frame, so the newest, which that keyframe may be on a
+    // static screen, always gets shown.
+    slot_publish(slot, vitastats_frame_pipeline_us(), decoded_us);
     return DR_OK;
   }
 
   if (vitabench_active()) {
     // Read the benchmark page's strip from the texture this frame was decoded into
-    vita2d_texture *decoded = frame_textures[back_texture_idx];
+    vita2d_texture *decoded = target;
     vitabench_frame_decoded(decodeUnit, submit_us, hw_start_us, decoded_us,
                             vita2d_texture_get_datap(decoded),
                             // In YUV mode the probes read the Y (luma) plane, one byte per pixel
@@ -658,13 +1047,16 @@ static int vita_submit_decode_unit(PDECODE_UNIT decodeUnit) {
                             image_scaling.region_x2, image_scaling.region_y2);
   }
 
+  // Held while drawing, so the pause menu can't start drawing in the middle
+  pthread_mutex_lock(&present_mutex);
   // Paused while this unit was decoding: don't draw over the menu
   if (active_video_thread) {
     // Never drop the resume keyframe: on a static screen nothing may follow it
-    if (need_drop > 0 && !recovery_keyframe) {
-      vita_debug_log("remain frameskip: %d\n", need_drop);
+    uint32_t pending_drops = __atomic_load_n(&need_drop, __ATOMIC_RELAXED);
+    if (pending_drops > 0 && !recovery_keyframe) {
+      vita_debug_log("remain frameskip: %d\n", pending_drops);
       // skip
-      need_drop--;
+      __atomic_fetch_sub(&need_drop, 1, __ATOMIC_RELAXED);
       vitastats_frame_dropped_by_pacer();
     } else {
       // The decode above overlapped with the GPU drawing the previous frame from
@@ -687,10 +1079,11 @@ static int vita_submit_decode_unit(PDECODE_UNIT decodeUnit) {
       }
 
       // Only flip after drawing, so a dropped frame's texture is simply reused
-      back_texture_idx = (back_texture_idx + 1) % FRAME_TEXTURE_COUNT;
-      frame_count++;
+      back_texture_idx = (back_texture_idx + 1) % frame_texture_count;
+      __atomic_fetch_add(&frame_count, 1, __ATOMIC_RELAXED);
     }
   }
+  pthread_mutex_unlock(&present_mutex);
 
   // if (numframes++ % 6 == 0)
   //   return DR_NEED_IDR;
@@ -766,8 +1159,20 @@ void vitavideo_start() {
   // dropped until then), so the keyframe that ends the wait is always drawn;
   // and it's asked for only after, so it can't be dropped as paused
   bool resuming = __atomic_load_n(&keyframe_state, __ATOMIC_ACQUIRE) == KEYFRAME_PAUSED;
+  pthread_mutex_lock(&present_mutex);
   active_video_thread = true;
-  vita2d_set_vblank_wait(config.enable_vita_vblank_wait);
+  pthread_mutex_unlock(&present_mutex);
+  if (presenter_enabled) {
+    // Frames decoded before the stream started (its first keyframe) wait in the
+    // queue; keep only the newest so the reserve starts from nothing
+    pthread_mutex_lock(&queue_mutex);
+    queue_open = true;
+    ready_trim_locked(1);
+    pthread_mutex_unlock(&queue_mutex);
+  }
+  // The presenter waits for the refresh itself, and a swap that also waited
+  // would only delay it
+  vita2d_set_vblank_wait(presenter_enabled ? false : config.enable_vita_vblank_wait);
   if (resuming) {
     __atomic_store_n(&keyframe_request_us, sceKernelGetSystemTimeWide(), __ATOMIC_RELAXED);
     __atomic_store_n(&keyframe_state, KEYFRAME_AWAITED, __ATOMIC_RELEASE);
@@ -776,9 +1181,20 @@ void vitavideo_start() {
 }
 
 void vitavideo_stop() {
-  vita2d_set_vblank_wait(true);
   __atomic_store_n(&keyframe_state, KEYFRAME_PAUSED, __ATOMIC_RELEASE);
+  // Taking the mutex waits for a frame being drawn to finish. After this none
+  // starts, so vita2d belongs to the caller (the pause menu) alone.
+  pthread_mutex_lock(&present_mutex);
   active_video_thread = false;
+  pthread_mutex_unlock(&present_mutex);
+  if (presenter_enabled) {
+    // Closed, so a frame still decoding is thrown away instead of queued
+    pthread_mutex_lock(&queue_mutex);
+    queue_open = false;
+    ready_trim_locked(0);
+    pthread_mutex_unlock(&queue_mutex);
+  }
+  vita2d_set_vblank_wait(true);
 }
 
 void vitavideo_show_poor_net_indicator() {

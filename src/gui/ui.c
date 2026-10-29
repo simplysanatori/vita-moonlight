@@ -580,6 +580,7 @@ int global_loop(int cursor, void *ctx, const input_data *input) {
       vitainput_config(config);
 
       sceKernelDelayThread(500 * 1000);
+      ui_end();
       connection_resume();
 
       while (connection_is_connected()) {

@@ -39,6 +39,19 @@ void vitastats_frame_decoded(uint64_t decode_us);
 void vitastats_frame_rendered(uint64_t render_us);
 void vitastats_frame_dropped_by_pacer(void);
 
+// The presenter (frame pacing Smooth) draws on its own thread, so a frame's
+// timings are collected when it is decoded and completed when it is shown.
+// The time the frame just decoded has taken so far, to pass to
+// vitastats_frame_presented() later. Call right after vitastats_frame_decoded().
+uint64_t vitastats_frame_pipeline_us(void);
+// A queued frame reached the screen: wait_us in the queue, render_us drawing it
+void vitastats_frame_presented(uint64_t pipeline_us, uint64_t wait_us, uint64_t render_us);
+// Once per refresh: whether a new frame was shown (else the last stayed up),
+// and how many decoded frames were waiting
+void vitastats_presenter_vblank(bool presented, int queue_depth);
+// A queued frame was thrown away to bring the queue back to its size
+void vitastats_frame_dropped_by_presenter(void);
+
 // Rolls the counters into the displayed figures. Call about once a second.
 void vitastats_tick(void);
 
