@@ -20,6 +20,7 @@
 #include "config.h"
 #include "debug.h"
 #include "gui/guilib.h"
+#include "wifiturbo.h"
 
 #include <pthread.h>
 #include <stdio.h>
@@ -28,7 +29,7 @@
 #include <psp2/power.h>
 #include <vita2d.h>
 
-#define STATS_LINE_COUNT 10
+#define STATS_LINE_COUNT 11
 #define STATS_LINE_LENGTH 80
 #define STATS_FONT_SIZE 16
 #define STATS_LINE_HEIGHT 18
@@ -232,6 +233,11 @@ void vitastats_tick(void) {
     channel = info.channel;
   }
 
+  // From the Wi-Fi Turbo plugin, when it's installed. Asked here, once a
+  // second on the statistics thread, and only for the overlay that shows it.
+  wifiturbo_sample turbo = {0};
+  bool have_turbo = config.stats_overlay == STATS_OVERLAY_FULL && wifiturbo_sample_link(&turbo);
+
   float received_fps = w.frames_received / seconds;
   float drawn_fps = w.frames_rendered / seconds;
   float mbps = w.bytes * 8 / seconds / 1000000.0f;
@@ -273,6 +279,15 @@ void vitastats_tick(void) {
   int new_wifi_line = n;
   snprintf(new_lines[n++], STATS_LINE_LENGTH, "Wi-Fi %d%% (%d dBm) ch %d  packet %d B",
            rssi_percent, rssi_dbm, channel, config.stream.packetSize);
+  if (have_turbo) {
+    // The signal against the noise says more than its strength alone: a
+    // strong signal with a low SNR means interference
+    char snr[40] = "SNR n/a";
+    if (turbo.link) {
+      snprintf(snr, sizeof(snr), "SNR %d dB  noise %d dBm", turbo.snr_db, turbo.noise_floor_dbm);
+    }
+    snprintf(new_lines[n++], STATS_LINE_LENGTH, "%s  profile %s", snr, turbo.profile ? turbo.profile : "n/a");
+  }
   snprintf(new_lines[n++], STATS_LINE_LENGTH, "Clocks cpu %d bus %d gpu %d MHz",
            scePowerGetArmClockFrequency(), scePowerGetBusClockFrequency(),
            scePowerGetGpuClockFrequency());
