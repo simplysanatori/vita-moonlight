@@ -620,6 +620,7 @@ void gui_loop() {
     config.bench_autorun = false;
     config_save(config_path, &config);
     vitabench_run(true);
+    vita_debug_flush(); // sceKernelExitProcess skips the atexit flush
     sceKernelExitProcess(0);
   }
 
