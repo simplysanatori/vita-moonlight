@@ -60,7 +60,7 @@ vita (upstream 0.13.2)
 | #3 | **Stats overlay** (off / fps / full): latency estimate, bitrate, loss, timings, Wi-Fi (yellow below 60%) | Full mode costs ~1.2 ms render; fps mode ~0.1 ms |
 | #4 | Toggles: packet size, legacy decode, input sync; frame pacer off by default | |
 | #13 | **Fast colour decoding** (default on): the decoder outputs NV21 into `YVU420P2_CSC0` textures and the GPU converts colour | Hardware decode 4.6 → 2.4 ms (−45%). Colours verified against RGBA by pixel readback |
-| #15 | **Reorder window:** the submodule points at `juanjsebgarcia/moonlight-common-c` (branch `reorder-window`), which holds the next frame's packets while the current frame is incomplete. `video_reorder_wait_ms` (default 20), applied via `LiSetVideoReorderWaitUs()` | At ~60% Wi-Fi: freezes 23-37/min → 1-3/min, same latency. ~10% of video packets arrive out of order on the Vita |
+| #15 | **Reorder window:** the submodule points at `simplysanatori/moonlight-common-c` (branch `vita-perf`): upstream `master` (nanors FEC, loss handling, thread fixes) plus the reorder window from `juanjsebgarcia/moonlight-common-c`, rebased on top, and a Vita fork patch that makes the local-address probe non-fatal. The window holds the next frame's packets while the current frame is incomplete. `video_reorder_wait_ms` (default 20), applied via `LiSetVideoReorderWaitUs()` | At ~60% Wi-Fi: freezes 23-37/min → 1-3/min, same latency. ~10% of video packets arrive out of order on the Vita |
 
 ### Settings and menus
 

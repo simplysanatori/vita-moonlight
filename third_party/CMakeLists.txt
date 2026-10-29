@@ -60,8 +60,9 @@ add_library(moonlight-common-c STATIC
     moonlight-common-c/src/VideoDepacketizer.c
     moonlight-common-c/src/VideoStream.c
     # Reed-Solomon FEC: nanors (git submodule of moonlight-common-c, so the clone must be --recursive).
-    # NEON is picked at run time inside oblas_lite.c when __ARM_NEON is defined, which the
-    # vitasdk GCC does by default (--with-arch=armv7-a --with-fpu=neon --with-float=hard).
+    # NEON is selected at compile time inside oblas_lite.c when __ARM_NEON is defined (there is no
+    # run-time probe on 32-bit ARM, and the scalar fallback is silent). The vitasdk GCC defines it
+    # by default (--with-arch=armv7-a --with-fpu=neon --with-float=hard); CI checks that it did.
     moonlight-common-c/nanors/rs.c
     moonlight-common-c/nanors/deps/obl/oblas_common.c
     moonlight-common-c/nanors/deps/obl/oblas_lite.c

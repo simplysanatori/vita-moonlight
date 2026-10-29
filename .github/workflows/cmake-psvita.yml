@@ -32,6 +32,20 @@ jobs:
           cmake -S . -B build
           make -C build -j"$(nproc)"
 
+      # nanors picks its NEON Reed-Solomon path at compile time (#if __ARM_NEON in oblas_lite.c) and
+      # silently falls back to scalar code otherwise, so fail the build if NEON was not compiled in
+      - name: Verify nanors NEON path is compiled in
+        run: |
+          export PATH="$VITASDK/bin:$PATH"
+          echo | arm-vita-eabi-gcc -dM -E - | grep -E '__ARM_NEON|__ARM_ARCH |__ARM_PCS_VFP' || true
+          echo | arm-vita-eabi-gcc -dM -E - | grep '^#define __ARM_NEON ' >/dev/null \
+            || { echo "::error::__ARM_NEON is not defined, nanors would use the scalar FEC path"; exit 1; }
+          obj="$(find build -name 'oblas_lite.c.obj' | head -n 1)"
+          test -n "$obj" || { echo "::error::oblas_lite.c.obj not found under build/"; exit 1; }
+          echo "Checking $obj"
+          arm-vita-eabi-objdump -d "$obj" | grep -E 'vtbl\.8' >/dev/null \
+            || { echo "::error::no NEON vtbl instructions in $obj, nanors fell back to scalar code"; exit 1; }
+
       - name: Upload VPK artifact
         uses: actions/upload-artifact@v4
         with:

@@ -129,7 +129,10 @@ static int start_stream(int appId, char *err, size_t err_len) {
   // Si se seleccionó una resolución específica, se mantiene; si es -1, se deja al host
   // (No se modifica config.stream.width/height aquí)
 
+  // Clamp so a bad config value cannot overflow the microsecond conversion below
   int reorder_wait_ms = config.video_reorder_wait_ms < 0 ? 0 : config.video_reorder_wait_ms;
+  if (reorder_wait_ms > 200)
+    reorder_wait_ms = 200;
   LiSetVideoReorderWaitUs((uint32_t)reorder_wait_ms * 1000);
 
   vita_debug_log("Running LiStartConnection...");
