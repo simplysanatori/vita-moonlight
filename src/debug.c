@@ -104,7 +104,7 @@ void vita_debug_log_thread(const char *label) {
     return;
   }
 
-  vita_debug_log("[THREAD] %s (%s): priority init 0x%x current 0x%x, affinity init 0x%x current 0x%x, cpu %d",
+  vita_debug_log("[THREAD] %s (%s): priority init %d current %d, affinity init 0x%x current 0x%x, cpu %d, stack %d",
                  label, info.name, info.initPriority, info.currentPriority,
-                 info.initCpuAffinityMask, info.currentCpuAffinityMask, info.currentCpuId);
+                 info.initCpuAffinityMask, info.currentCpuAffinityMask, info.currentCpuId, info.stackSize);
 }

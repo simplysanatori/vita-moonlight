@@ -44,6 +44,18 @@ add_definitions(-DVERSION_PATCH=${VERSION_PATCH})
 set(VITA_OPT_LEVEL "-O2" CACHE STRING "Optimisation flag for all C sources, e.g. -O0 for debugging")
 set(CMAKE_C_FLAGS "-Wl,-q -g ${VITA_OPT_LEVEL} -std=gnu99 -D__vita__")
 
+# Priorities and cores for the streaming threads (src/threadplan.c). Turn either
+# off to compare: THREAD_TUNING=OFF leaves every thread as it was, THREAD_PINNING=OFF
+# keeps the priorities but doesn't pin any thread to a core
+option(THREAD_TUNING "Give the streaming threads explicit priorities" ON)
+option(THREAD_PINNING "Pin the receive, decode and audio threads to their own cores" ON)
+if(NOT THREAD_TUNING)
+	add_definitions(-DVITA_THREAD_TUNING=0)
+endif()
+if(NOT THREAD_PINNING)
+	add_definitions(-DVITA_THREAD_PINNING=0)
+endif()
+
 
 
 include_directories(
@@ -70,6 +82,7 @@ add_executable(${PROJECT_NAME}.elf
 	src/stats.c
 	src/bench.c
 	src/netcount.c
+	src/threadplan.c
 	src/settings.c
 	src/session.c
 	src/hosts.c
@@ -122,6 +135,8 @@ target_link_libraries(${PROJECT_NAME}.elf
 	-Wl,--wrap=recvUdpSocket
 	# Logs the receive buffer granted to the video socket (src/netcount.c)
 	-Wl,--wrap=bindUdpSocket
+	# Sets the priority and core of common-c's threads as they start (src/threadplan.c)
+	-Wl,--wrap=PltCreateThread
 	-lexpat
 	-lcurl
 	moonlight-common-c
