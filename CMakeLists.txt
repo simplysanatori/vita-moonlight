@@ -57,6 +57,7 @@ include_directories(
 	third_party/enet/include/
 	third_party/inih/
 	third_party/mdnsniff/
+	third_party/wifiturbo/
 )
 
 
@@ -70,6 +71,7 @@ add_executable(${PROJECT_NAME}.elf
 	src/stats.c
 	src/bench.c
 	src/netcount.c
+	src/wifiturbo.c
 	src/settings.c
 	src/session.c
 	src/hosts.c
@@ -111,6 +113,22 @@ add_executable(${PROJECT_NAME}.elf
 )
 
 
+# Imports for the optional vita-turbo-wifi plugin (src/wifiturbo.c), made from
+# its function list the way vita_create_stubs() does, which can't be used here
+# as it reads the plugin's compiled module. The weak stubs let Moonlight load
+# when the plugin isn't installed.
+set(WIFITURBO_STUB_DIR ${CMAKE_BINARY_DIR}/wifiturbo_stubs)
+set(WIFITURBO_STUB_LIB ${WIFITURBO_STUB_DIR}/libSceWifiTurbo_stub_weak.a)
+add_custom_command(
+	OUTPUT ${WIFITURBO_STUB_LIB}
+	COMMAND ${VITA_LIBS_GEN} ${CMAKE_SOURCE_DIR}/third_party/wifiturbo/wifiturbo_imports.yml ${WIFITURBO_STUB_DIR}
+	COMMAND make -C ${WIFITURBO_STUB_DIR}
+	DEPENDS ${CMAKE_SOURCE_DIR}/third_party/wifiturbo/wifiturbo_imports.yml
+	COMMENT "Building the Wi-Fi Turbo import stubs"
+)
+add_custom_target(wifiturbo-stubs DEPENDS ${WIFITURBO_STUB_LIB})
+add_dependencies(${PROJECT_NAME}.elf wifiturbo-stubs)
+
 # Por defecto, solo enlazamos curl y el resto de libs estándar:
 target_link_libraries(${PROJECT_NAME}.elf
 	# Room for vita-elf-create's module tables before the data segment (sce_gap.ld)
@@ -142,6 +160,8 @@ target_link_libraries(${PROJECT_NAME}.elf
 	-lSceTouch_stub
 	-lSceNet_stub
 	-lSceNetCtl_stub
+	# Weak, by full path: only the generated archive has these imports
+	${WIFITURBO_STUB_LIB}
 	-lSceRegistryMgr_stub
 	-lScePower_stub
 	-lSceVideodec_stub
