@@ -81,7 +81,7 @@ void psvDebugScreenInit() {
 
 	int ret = sceDisplaySetFrameBuf(&framebuf, SCE_DISPLAY_UPDATETIMING_NEXTVSYNC);
 
-	if (!ret) {
+	if (ret < 0) {
 		printf("Failure to set Framebuffer!");
 	}
 
