@@ -50,7 +50,6 @@ include_directories(
 	include/
 	src/
 	third_party/moonlight-common-c/src/
-	third_party/moonlight-common-c/reedsolomon/
 	libgamestream/
 	third_party/libuuid/src/
 	third_party/h264bitstream/

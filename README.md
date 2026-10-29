@@ -124,7 +124,11 @@ To build in Docker without installing VitaSDK, deploy builds to a Vita over Wi-F
 - **VitaSDK** installed and configured on your system ([guide here](https://vitasdk.org/)).
 - **Submodules updated:**
   ```sh
-  git submodule update --init
+  git submodule update --init --recursive
+  ```
+  `third_party/moonlight-common-c` has a nested submodule (nanors), so `--recursive` is required. If you already have a clone from before the submodule moved to `simplysanatori/moonlight-common-c`, also run this once after pulling:
+  ```sh
+  git submodule sync --recursive && git submodule update --init --recursive
   ```
 
 ---
@@ -147,7 +151,8 @@ If you prefer to build manually:
 
 ```sh
 # If you do git pull, make sure to update submodules first
- git submodule update --init
+ git submodule sync --recursive   # once, if the submodule URL changed since your clone
+ git submodule update --init --recursive
  mkdir build && cd build
  cmake ..
  make
