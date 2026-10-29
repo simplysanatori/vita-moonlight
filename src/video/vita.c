@@ -107,6 +107,102 @@ SceUID pacer_thread = -1;
 SceVideodecQueryInitInfoHwAvcdec *init = NULL;
 SceAvcdecQueryDecoderInfo *decoder_info = NULL;
 
+// Reference frames the decoder is created with when reference frame invalidation
+// is on, largest first: after a lost frame the host encodes against an older
+// picture than the last one, and the decoder has to still hold it
+static const int RFI_REF_FRAME_CANDIDATES[] = {16, 8, 5, 4};
+// What the decoder is created with without it, when the SPS says there is just one
+#define DEFAULT_REF_FRAMES 4
+// The most the decoder's memblock may take from PHYCONT, which defaults to 26 MiB
+// and has to share it. 16 references fit at 960x544, but not at 1280x720
+#define RFI_DECODER_MEM_LIMIT (16 * 1024 * 1024)
+// What gs_sps_fix may keep of the host's num_ref_frames: the decoder's count with
+// reference frame invalidation on, 1 without
+static int sps_ref_frames = 1;
+
+// Whether a decoder for refs reference frames can be created at this size, tried
+// out and released again. mem_size is the memblock it takes.
+static bool vita_probe_ref_frames(int refs, unsigned horizontal, unsigned vertical, size_t *mem_size) {
+  *mem_size = 0;
+
+  SceVideodecQueryInitInfoHwAvcdec probe_init = {0};
+  probe_init.size = sizeof(probe_init);
+  probe_init.horizontal = horizontal;
+  probe_init.vertical = vertical;
+  probe_init.numOfRefFrames = refs;
+  probe_init.numOfStreams = 1;
+  int ret = sceVideodecInitLibrary(SCE_VIDEODEC_TYPE_HW_AVCDEC, &probe_init);
+  if (ret < 0) {
+    printf("%d reference frames: sceVideodecInitLibrary 0x%x\n", refs, ret);
+    return false;
+  }
+
+  bool ok = false;
+  SceAvcdecQueryDecoderInfo probe_info = {0};
+  probe_info.horizontal = horizontal;
+  probe_info.vertical = vertical;
+  probe_info.numOfRefFrames = refs;
+  SceAvcdecDecoderInfo probe_out = {0};
+  ret = sceAvcdecQueryDecoderMemSize(SCE_VIDEODEC_TYPE_HW_AVCDEC, &probe_info, &probe_out);
+  if (ret < 0) {
+    printf("%d reference frames: sceAvcdecQueryDecoderMemSize 0x%x\n", refs, ret);
+  } else {
+    // Rounded up to 1 MiB, as the real memblock is
+    *mem_size = (probe_out.frameMemSize + 0xFFFFF) & ~0xFFFFF;
+    if (*mem_size > RFI_DECODER_MEM_LIMIT) {
+      printf("%d reference frames: decoder memblock %u KiB is over the %u KiB limit\n",
+             refs, (unsigned)(*mem_size / 1024), (unsigned)(RFI_DECODER_MEM_LIMIT / 1024));
+    } else {
+      SceUID block = sceKernelAllocMemBlock("decoder_probe", SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_NC_RW,
+                                            *mem_size, NULL);
+      if (block < 0) {
+        printf("%d reference frames: can't allocate %u KiB of PHYCONT, 0x%08x\n",
+               refs, (unsigned)(*mem_size / 1024), block);
+      } else {
+        SceAvcdecCtrl probe_ctrl = {0};
+        probe_ctrl.frameBuf.size = *mem_size;
+        ret = sceKernelGetMemBlockBase(block, &probe_ctrl.frameBuf.pBuf);
+        if (ret >= 0) {
+          ret = sceAvcdecCreateDecoder(SCE_VIDEODEC_TYPE_HW_AVCDEC, &probe_ctrl, &probe_info);
+          if (ret >= 0) {
+            sceAvcdecDeleteDecoder(&probe_ctrl);
+            ok = true;
+          } else {
+            printf("%d reference frames: sceAvcdecCreateDecoder 0x%x\n", refs, ret);
+          }
+        } else {
+          printf("%d reference frames: sceKernelGetMemBlockBase 0x%x\n", refs, ret);
+        }
+        sceKernelFreeMemBlock(block);
+      }
+    }
+  }
+
+  sceVideodecTermLibrary(SCE_VIDEODEC_TYPE_HW_AVCDEC);
+  return ok;
+}
+
+// How many reference frames to create the decoder with, and so to let the SPS keep
+static int vita_pick_ref_frames(unsigned horizontal, unsigned vertical, bool rfi) {
+  if (!rfi) {
+    return DEFAULT_REF_FRAMES;
+  }
+
+  int count = sizeof(RFI_REF_FRAME_CANDIDATES) / sizeof(RFI_REF_FRAME_CANDIDATES[0]);
+  for (int i = 0; i < count; i++) {
+    size_t mem_size;
+    if (vita_probe_ref_frames(RFI_REF_FRAME_CANDIDATES[i], horizontal, vertical, &mem_size)) {
+      printf("reference frame invalidation: decoder with %d reference frames, memblock %u KiB\n",
+             RFI_REF_FRAME_CANDIDATES[i], (unsigned)(mem_size / 1024));
+      return RFI_REF_FRAME_CANDIDATES[i];
+    }
+  }
+  // None took, so creating the decoder will fail and say why
+  printf("reference frame invalidation: no decoder with %d or more reference frames, trying %d\n",
+         RFI_REF_FRAME_CANDIDATES[count - 1], DEFAULT_REF_FRAMES);
+  return DEFAULT_REF_FRAMES;
+}
+
 typedef struct {
   bool activated;
   uint8_t alpha;
@@ -421,7 +517,9 @@ static int vita_setup(int videoFormat, int width, int height, int redrawRate, vo
     init->size = sizeof(SceVideodecQueryInitInfoHwAvcdec);
     init->horizontal = VITA_DECODER_RESOLUTION(width);
     init->vertical = VITA_DECODER_RESOLUTION(height);
-    init->numOfRefFrames = 4;
+    init->numOfRefFrames = vita_pick_ref_frames(init->horizontal, init->vertical,
+                                                config.enable_ref_frame_invalidation);
+    sps_ref_frames = config.enable_ref_frame_invalidation ? init->numOfRefFrames : 1;
     init->numOfStreams = 1;
 
     ret = sceVideodecInitLibrary(SCE_VIDEODEC_TYPE_HW_AVCDEC, init);
@@ -466,7 +564,7 @@ static int vita_setup(int videoFormat, int width, int height, int redrawRate, vo
 
     size_t sz = (decoder_info_out.frameMemSize + 0xFFFFF) & ~0xFFFFF;
     decoder->frameBuf.size = sz;
-    printf("allocating size 0x%x\n", sz);
+    printf("allocating size 0x%x (%u KiB) for %u reference frames\n", sz, (unsigned)(sz / 1024), decoder_info->numOfRefFrames);
 
     decoderblock = sceKernelAllocMemBlock("decoder", SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_NC_RW, sz, NULL);
     if (decoderblock < 0) {
@@ -599,7 +697,7 @@ static int vita_submit_decode_unit(PDECODE_UNIT decodeUnit) {
   uint32_t length = 0;
   while (entry != NULL) {
     if (entry->bufferType == BUFFER_TYPE_SPS) {
-      gs_sps_fix(entry, GS_SPS_BITSTREAM_FIXUP, decoder_buffer, &length);
+      gs_sps_fix(entry, GS_SPS_BITSTREAM_FIXUP, decoder_buffer, &length, sps_ref_frames);
     } else {
       memcpy(decoder_buffer+length, entry->data, entry->length);
       length += entry->length;
