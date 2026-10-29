@@ -145,8 +145,7 @@ static void tune_self(const char *name) {
     affinity_rc = sceKernelChangeThreadCpuAffinityMask(self, cpu_mask);
   }
   if (priority_rc < 0 || affinity_rc < 0) {
-    sceClibPrintf("[THREAD] %s: priority %d rc 0x%x, mask 0x%x rc 0x%x
-",
+    sceClibPrintf("[THREAD] %s: priority %d rc 0x%x, mask 0x%x rc 0x%x\n",
                   name, p->priority, priority_rc, cpu_mask, affinity_rc);
   }
   if (!logging) {
