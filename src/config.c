@@ -117,6 +117,8 @@ static int ini_handle(void *out, const char *section, const char *name,
       config->sops = BOOL(value);
     } else if (strcmp(name, "localaudio") == 0) {
       config->localaudio = BOOL(value);
+    } else if (strcmp(name, "audio_packet_ms") == 0) {
+      config->audio_packet_ms = INT(value);
     } else if (strcmp(name, "enable_frame_pacer") == 0) {
       config->enable_frame_pacer = BOOL(value);
     } else if (strcmp(name, "video_reorder_wait_ms") == 0) {
@@ -236,6 +238,8 @@ bool config_save(const char* filename, PCONFIGURATION config) {
     write_config_bool(fd, "sops", config->sops);
   if (config->localaudio)
     write_config_bool(fd, "localaudio", config->localaudio);
+  if (config->audio_packet_ms != 5)
+    write_config_int(fd, "audio_packet_ms", config->audio_packet_ms);
 
   if (config->app && strcmp(config->app, "Steam") != 0)
     write_config_string(fd, "app", config->app);
@@ -341,6 +345,7 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
   config->config_file = NULL;
   config->sops = true;
   config->localaudio = false;
+  config->audio_packet_ms = 5;
   config->fullscreen = true;
   config->unsupported_version = false;
   config->save_debug_log = false;
@@ -461,6 +466,12 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
 
   if (config->app_list_style < 0 || config->app_list_style >= APP_LIST_STYLE_COUNT) {
     config->app_list_style = APP_LIST_BOXART;
+  }
+
+  // Only the durations common-c can ask the host for
+  if (config->audio_packet_ms != 5 && config->audio_packet_ms != 10) {
+    vita_debug_log("audio_packet_ms %d not 5 or 10, using 5", config->audio_packet_ms);
+    config->audio_packet_ms = 5;
   }
 
   // Larger packets would be IP-fragmented on a standard 1500-byte MTU
