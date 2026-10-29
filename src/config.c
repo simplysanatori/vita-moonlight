@@ -127,6 +127,8 @@ static int ini_handle(void *out, const char *section, const char *name,
       config->disable_powersave = BOOL(value);
     } else if (strcmp(name, "boost_clocks") == 0) {
       config->boost_clocks = BOOL(value);
+    } else if (strcmp(name, "pin_threads") == 0) {
+      config->pin_threads = BOOL(value);
     } else if (strcmp(name, "direct_decode") == 0) {
       config->direct_decode = BOOL(value);
     } else if (strcmp(name, "input_sync_to_controller") == 0) {
@@ -246,6 +248,7 @@ bool config_save(const char* filename, PCONFIGURATION config) {
   write_config_bool(fd, "center_region_only", config->center_region_only);
   write_config_bool(fd, "disable_powersave", config->disable_powersave);
   write_config_bool(fd, "boost_clocks", config->boost_clocks);
+  write_config_bool(fd, "pin_threads", config->pin_threads);
   write_config_bool(fd, "direct_decode", config->direct_decode);
   write_config_bool(fd, "input_sync_to_controller", config->input_sync_to_controller);
   write_config_bool(fd, "developer_mode", config->developer_mode);
@@ -346,6 +349,7 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
   config->save_debug_log = false;
   config->disable_powersave = true;
   config->boost_clocks = true;
+  config->pin_threads = false;
   config->direct_decode = false;
   config->input_sync_to_controller = true;
   config->developer_mode = false;

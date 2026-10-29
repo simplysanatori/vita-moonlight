@@ -921,8 +921,7 @@ bool vitainput_init() {
   sceTouchSetSamplingState(SCE_TOUCH_PORT_FRONT, SCE_TOUCH_SAMPLING_STATE_START);
   sceTouchSetSamplingState(SCE_TOUCH_PORT_BACK, SCE_TOUCH_SAMPLING_STATE_START);
 
-  SceUID thid = sceKernelCreateThread("vitainput_thread", vitainput_thread, threadplan_priority("vitainput_thread", 0), 0x40000, 0,
-                                  threadplan_affinity("vitainput_thread"), NULL);
+  SceUID thid = threadplan_create("vitainput_thread", vitainput_thread, 0, 0x40000);
   if (thid >= 0) {
     sceKernelStartThread(thid, 0, NULL);
     return true;

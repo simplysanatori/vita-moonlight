@@ -798,12 +798,14 @@ static void write_report(FILE *f, const char *started, const char *host, const c
   fprintf(f, ",\n  \"seconds\": %.1f,\n", seconds);
   fprintf(f, "  \"settings\": {\"width\": %d, \"height\": %d, \"fps\": %d, \"bitrate_kbps\": %d, "
              "\"packet_size\": %d, \"direct_decode\": %s, \"input_sync\": %s, \"boost_clocks\": %s, "
-             "\"frame_pacer\": %s, \"vblank_wait\": %s, \"stats_overlay\": %d, \"debug_log\": %s, \"decode_yuv\": %s},\n",
+             "\"frame_pacer\": %s, \"vblank_wait\": %s, \"stats_overlay\": %d, \"debug_log\": %s, \"decode_yuv\": %s, "
+             "\"pin_threads\": %s},\n",
           config.stream.width, config.stream.height, config.stream.fps, config.stream.bitrate,
           config.stream.packetSize, config.direct_decode ? "true" : "false",
           config.input_sync_to_controller ? "true" : "false", config.boost_clocks ? "true" : "false",
           config.enable_frame_pacer ? "true" : "false", config.enable_vita_vblank_wait ? "true" : "false",
-          config.stats_overlay, config.save_debug_log ? "true" : "false", config.decode_yuv ? "true" : "false");
+          config.stats_overlay, config.save_debug_log ? "true" : "false", config.decode_yuv ? "true" : "false",
+          config.pin_threads ? "true" : "false");
   fprintf(f, "  \"frames\": {\"received\": %u, \"rendered\": %u, \"fps_received\": %.2f, \"fps_rendered\": %.2f, "
              "\"lost_network\": %u, \"idr\": %u, \"replaced_before_shown\": %u, \"freezes\": %u},\n",
           state.frames_received, state.frames_rendered,

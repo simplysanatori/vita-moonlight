@@ -29,18 +29,14 @@ bool vita_motion_init() {
     sceMotionStartSampling();
     sceMotionReset();
 
-    SceUID thid = sceKernelCreateThread("vitainput_motion_gyro_thread", vitainput_motion_gyro_thread,
-                                  threadplan_priority("vitainput_motion_gyro_thread", 0), 0x40000, 0,
-                                  threadplan_affinity("vitainput_motion_gyro_thread"), NULL);
+    SceUID thid = threadplan_create("vitainput_motion_gyro_thread", vitainput_motion_gyro_thread, 0, 0x40000);
     if (thid >= 0) {
         sceKernelStartThread(thid, 0, NULL);
     } else {
       return false;
     }
 
-    thid = sceKernelCreateThread("vitainput_motion_accel_thread", vitainput_motion_accel_thread,
-                              threadplan_priority("vitainput_motion_accel_thread", 0), 0x40000, 0,
-                              threadplan_affinity("vitainput_motion_accel_thread"), NULL);
+    thid = threadplan_create("vitainput_motion_accel_thread", vitainput_motion_accel_thread, 0, 0x40000);
     if (thid >= 0) {
         sceKernelStartThread(thid, 0, NULL);
         return true;

@@ -272,8 +272,7 @@ void start_host_scan_thread() {
         g_host_status[i].status = HOST_OFFLINE;
         g_host_status[i].current_ip[0] = '\0';
     }
-    SceUID tid = sceKernelCreateThread("hostscan", host_scan_thread, threadplan_priority("hostscan", 0x10000100), 0x10000, 0,
-                                  threadplan_affinity("hostscan"), NULL);
+    SceUID tid = threadplan_create("hostscan", host_scan_thread, 0x10000100, 0x10000);
     if (tid < 0) {
         vita_debug_log("[SCAN] Error creando hilo de escaneo: 0x%08x\n", tid);
         return;

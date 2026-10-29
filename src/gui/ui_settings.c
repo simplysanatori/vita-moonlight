@@ -678,6 +678,7 @@ void ui_settings_save_config() {
   vita_debug_log("  save_debug_log = %d", config.save_debug_log);
   vita_debug_log("  disable_powersave = %d", config.disable_powersave);
   vita_debug_log("  boost_clocks = %d", config.boost_clocks);
+  vita_debug_log("  pin_threads = %d", config.pin_threads);
   vita_debug_log("  jp_layout = %d", config.jp_layout);
   vita_debug_log("  localaudio = %d", config.localaudio);
   vita_debug_log("  enable_frame_pacer = %d", config.enable_frame_pacer);

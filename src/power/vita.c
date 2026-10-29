@@ -129,8 +129,7 @@ int vitapower_thread(SceSize args, void *argp) {
 
 bool vitapower_init() {
   pthread_mutex_init(&clocks_mutex, NULL);
-  SceUID thid = sceKernelCreateThread("vitapower_thread", vitapower_thread, threadplan_priority("vitapower_thread", 0x10000100), 0x40000, 0,
-                                  threadplan_affinity("vitapower_thread"), NULL);
+  SceUID thid = threadplan_create("vitapower_thread", vitapower_thread, 0x10000100, 0x40000);
   if (thid >= 0)
     sceKernelStartThread(thid, 0, NULL);
 

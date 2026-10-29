@@ -57,6 +57,7 @@ TOGGLE(motion, config.enable_motion_controls)
 TOGGLE(sprint, config.enable_double_tap_sprint)
 TOGGLE(psbutton, config.enable_psbutton_capture)
 TOGGLE(touch_keys, config.enable_front_touchzones)
+TOGGLE(pin_threads, config.pin_threads)
 TOGGLE(direct_decode, config.direct_decode)
 
 /*
@@ -515,6 +516,11 @@ const setting_def SETTINGS[] = {
    .help = "Runs the Vita's processor and graphics at full speed while streaming, for smoother "
       "video and sound. Uses more battery. Turn it off to save battery if your streams "
       "already run smoothly."},
+  {.tab = SETTINGS_TAB_SYSTEM, .kind = SETTING_TOGGLE, .flags = SETTING_NEEDS_NEW_STREAM,
+   .label = "CPU core pinning", .is_on = pin_threads_on, .change = pin_threads_flip,
+   .help = "Keeps the video, sound and network work on separate processor cores. It may smooth "
+      "out stutter on a busy Wi-Fi network, or make it worse. Leave it off unless you want to "
+      "compare the two."},
   {.tab = SETTINGS_TAB_SYSTEM, .kind = SETTING_TOGGLE,
    .label = "Swap X & O for Moonlight", .is_on = jp_layout_on, .change = jp_layout_flip,
    .help = "Swaps X and O in Moonlight's own menus, so O confirms and X goes back, like on "

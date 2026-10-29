@@ -501,8 +501,7 @@ static int vita_setup(int videoFormat, int width, int height, int redrawRate, vo
 
   if (video_status == INIT_AVC_DEC) {
     // INIT_FRAME_PACER_THREAD
-    ret = sceKernelCreateThread("frame_pacer", vita_pacer_thread_main, threadplan_priority("frame_pacer", 0), 0x10000, 0,
-                          threadplan_affinity("frame_pacer"), NULL);
+    ret = threadplan_create("frame_pacer", vita_pacer_thread_main, 0, 0x10000);
     if (ret < 0) {
       printf("sceKernelCreateThread 0x%x\n", ret);
       ret = VITA_VIDEO_ERROR_CREATE_PACER_THREAD;
