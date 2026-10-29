@@ -2,6 +2,8 @@
 
 Vita Moonlight is a PlayStation Vita port of Moonlight, with major improvements for usability, pairing, device management, and now advanced touch, multitouch, and DS4 touchpad emulation.
 
+> **`perf-60fps` branch:** adds Frame pacing (Off / Smooth), safer reference frame invalidation, a thread priority plan with optional CPU core pinning, audio loss concealment and a 10 ms packet option, and Wi-Fi Turbo plugin support. Settings, defaults, hidden ini keys, what to look for in the debug log and an A/B test checklist are in [`docs/FORK-CHANGES.md`](docs/FORK-CHANGES.md#the-perf-60fps-branch-simplysanatorivita-moonlight). Clone with `--recurse-submodules`.
+
 ## Highlights (0.13.2)
 
 - **Touchscreen Modes Unified:** Select between three touchscreen modes from the settings menu:
