@@ -21,5 +21,8 @@
 
 void vita_debug_log(const char *s, ...);
 void vita_debug_log_thread(const char *label);
+// Writes out the log lines still waiting in the buffer. Called at the end of a
+// stream; also registered with atexit.
+void vita_debug_flush(void);
 
 bool vita_debug_init();
