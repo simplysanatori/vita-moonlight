@@ -67,7 +67,9 @@ int wqUiReadState(WqUiState *out);
 /* Queues a settings command ("roam off", "profile maxperf", ...) for the
  * plugin's resident module. The change is saved by the plugin. */
 int wqUiSubmit(const char *line);
-/* Only call while connected: the first call installs a kernel hook */
+/* Only call while connected: the first call installs a kernel hook. Like
+ * wqUiReadState, the kernel copies its own sizeof(WqLinkInternals) into out,
+ * so give it a buffer larger than ours. */
 int wqChipObserveGetLink(WqLinkInternals *out);
 
 #ifdef __cplusplus

@@ -511,6 +511,14 @@ static int run_action(const setting_def *setting) {
       show_settings_help(setting);
       return 0;
     case SETTING_ACTION_WIFITURBO_APPLY: {
+      if (settings_streaming()) {
+        return 0;
+      }
+      if (wifiturbo_apply_pending()) {
+        // The plugin hasn't finished the last request; asking again would only reconnect Wi-Fi again
+        flash_message("Wi-Fi Turbo is still applying the changes.");
+        return SETTINGS_REBUILD;
+      }
       char changes[256];
       bool reconnects;
       int count = wifiturbo_recommended_changes(changes, sizeof(changes), &reconnects);

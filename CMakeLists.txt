@@ -117,10 +117,11 @@ add_executable(${PROJECT_NAME}.elf
 # its function list the way vita_create_stubs() does, which can't be used here
 # as it reads the plugin's compiled module. The weak stubs let Moonlight load
 # when the plugin isn't installed.
-set(WIFITURBO_STUB_DIR ${CMAKE_BINARY_DIR}/wifiturbo_stubs)
+set(WIFITURBO_STUB_DIR ${CMAKE_CURRENT_BINARY_DIR}/wifiturbo_stubs)
 set(WIFITURBO_STUB_LIB ${WIFITURBO_STUB_DIR}/libSceWifiTurbo_stub_weak.a)
 add_custom_command(
 	OUTPUT ${WIFITURBO_STUB_LIB}
+	COMMAND ${CMAKE_COMMAND} -E make_directory ${WIFITURBO_STUB_DIR}
 	COMMAND ${VITA_LIBS_GEN} ${CMAKE_SOURCE_DIR}/third_party/wifiturbo/wifiturbo_imports.yml ${WIFITURBO_STUB_DIR}
 	COMMAND make -C ${WIFITURBO_STUB_DIR}
 	DEPENDS ${CMAKE_SOURCE_DIR}/third_party/wifiturbo/wifiturbo_imports.yml

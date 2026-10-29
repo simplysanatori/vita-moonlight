@@ -380,7 +380,8 @@ static bool wifiturbo_apply_listed(void) {
 }
 
 static void wifiturbo_check_help(char *out, size_t size) {
-  char details[800];
+  // All five texts and their gaps come to about 850 bytes; the help is 1024
+  char details[900];
   int count = wifiturbo_advice_details(details, sizeof(details));
   if (count < 0) {
     snprintf(out, size, "Couldn't read the Wi-Fi Turbo plugin's settings.");

@@ -11,11 +11,13 @@
 #include <psp2/io/fcntl.h>
 #include <psp2/io/stat.h>
 #include <psp2/kernel/processmgr.h>
+#include <psp2/net/netctl.h>
 
 // Moonlight links the plugin's SceWifiTurbo functions weakly, so it starts
-// without the plugin. Nothing below calls one until wqSelfTestPing() has
-// returned the plugin's magic number, and anything else counts as "not
-// installed".
+// without the plugin. wifiturbo_init() first checks that the system resolved
+// the imports, without calling one, then calls wqSelfTestPing(). Nothing else
+// is called unless that returned the plugin's magic number, and anything else
+// counts as "not installed".
 //
 // Settings the plugin could change under a stream are read, never changed,
 // unless the player picks "Apply recommended Wi-Fi Turbo settings".
@@ -34,6 +36,12 @@ enum {
 static int probe_state = PROBE_UNKNOWN;
 
 static char stream_notice[NOTICE_SIZE] = "";
+
+// The plugin applies a change only after its SceShell module drains the queue,
+// then reconnects Wi-Fi, one change after another, so the settings it
+// publishes lag by this much
+#define APPLY_SETTLE_US 20000000ULL
+static uint64_t last_apply_us = 0;
 
 // What can go wrong, in the order it is listed
 enum {
@@ -73,10 +81,25 @@ static const char *const PROFILE_NAMES[] = {"Max performance", "Balanced", "Batt
  * Finding the plugin
  */
 
+// vita-elf-create fills every import stub with "mvn r0, #0; bx lr", and the
+// system replaces it with a call into the plugin only when the import
+// resolves. Reading the stub, which is plain memory in this app, says whether
+// the plugin is there without calling it.
+static bool stub_unresolved(const void *function) {
+  const volatile uint32_t *words = (const volatile uint32_t *)((uintptr_t)function & ~(uintptr_t)1);
+  vita_debug_log("[WIFITURBO] wqSelfTestPing stub: %08X %08X %08X %08X\n", (unsigned)words[0],
+                 (unsigned)words[1], (unsigned)words[2], (unsigned)words[3]);
+  return words[0] == 0xE3E00000u && words[1] == 0xE12FFF1Eu;
+}
+
 static bool do_probe(void) {
-  // If calling the plugin ever crashed the app (a weak import that isn't
-  // really resolved), the file stays behind, and the plugin is not asked
-  // again. Delete wifiturbo.probe from the Moonlight data folder to try again.
+  if (stub_unresolved((const void *)wqSelfTestPing)) {
+    vita_debug_log("[WIFITURBO] SceWifiTurbo wasn't imported: the plugin isn't installed\n");
+    return false;
+  }
+  // The stub looks resolved. If calling it ever crashed the app, the file
+  // stays behind, and the plugin is not asked again. Delete wifiturbo.probe
+  // from the Moonlight data folder to try again.
   char marker[sizeof(config.key_dir) + 16];
   snprintf(marker, sizeof(marker), "%swifiturbo.probe", config.key_dir);
   SceIoStat stat;
@@ -96,13 +119,15 @@ static bool do_probe(void) {
   return (uint32_t)magic == WQ_SELFTEST_MAGIC;
 }
 
-bool wifiturbo_present(void) {
-  int state = __atomic_load_n(&probe_state, __ATOMIC_ACQUIRE);
-  if (state == PROBE_UNKNOWN) {
-    state = do_probe() ? PROBE_PRESENT : PROBE_ABSENT;
-    __atomic_store_n(&probe_state, state, __ATOMIC_RELEASE);
+void wifiturbo_init(void) {
+  if (probe_state == PROBE_UNKNOWN) {
+    probe_state = do_probe() ? PROBE_PRESENT : PROBE_ABSENT;
   }
-  return state == PROBE_PRESENT;
+}
+
+bool wifiturbo_present(void) {
+  // Read-only after wifiturbo_init(), so any thread can ask
+  return probe_state == PROBE_PRESENT;
 }
 
 // Reads the plugin's published settings. False when it isn't there, can't be
@@ -123,9 +148,16 @@ static bool read_state(WqUiState *state) {
     return false;
   }
   const WqUiState *s = &buffer.state;
+  // Everything zero is the state before the plugin's SceShell module has
+  // published anything: its own defaults have Keep Wi-Fi on and Auto-reconnect on
+  if (s->keepwifi == 0 && s->hud == 0 && s->autoreconnect == 0 && s->roam == 0 && s->ht40 == 0 &&
+      s->profile == 0 && s->devmode == 0 && s->rxring == 0 && s->hudpos == 0 && s->hudgame == 0) {
+    return false;
+  }
+  // Any receive buffer above 0 is a non-default one, so a size added later is still counted
   bool known = (s->roam == 0 || s->roam == 1) && (s->ht40 == 0 || s->ht40 == 1) &&
                (s->hudgame == 0 || s->hudgame == 1) && s->profile >= WQ_PROFILE_MAX_PERF &&
-               s->profile <= WQ_PROFILE_MAX_BATTERY && s->rxring >= 0 && s->rxring <= 2;
+               s->profile <= WQ_PROFILE_MAX_BATTERY && s->rxring >= 0;
   if (!known) {
     vita_debug_log("[WIFITURBO] unexpected settings: roam %d ht40 %d hudgame %d profile %d rxring %d\n",
                    s->roam, s->ht40, s->hudgame, s->profile, s->rxring);
@@ -210,9 +242,13 @@ int wifiturbo_advice_details(char *out, size_t size) {
 }
 
 void wifiturbo_advice_value(char *out, size_t size) {
+  if (wifiturbo_apply_pending()) {
+    snprintf(out, size, "applying changes");
+    return;
+  }
   WqUiState state;
   if (!read_state(&state)) {
-    snprintf(out, size, "not found");
+    snprintf(out, size, "unavailable");
     return;
   }
   int issues[ISSUE_COUNT];
@@ -280,6 +316,7 @@ int wifiturbo_apply_recommended(void) {
   const char *commands[4], *names[4];
   bool reconnects;
   int n = recommended_commands(&state, commands, names, &reconnects);
+  int submitted = 0;
   for (int i = 0; i < n; i++) {
     // The plugin copies a whole command buffer, however short the text
     char line[WQ_UI_CMD_MAX];
@@ -288,10 +325,16 @@ int wifiturbo_apply_recommended(void) {
     int ret = wqUiSubmit(line);
     vita_debug_log("[WIFITURBO] wqUiSubmit(\"%s\") returned %d\n", commands[i], ret);
     if (ret != WQ_OK) {
-      return -1;
+      break;
     }
+    submitted++;
+    last_apply_us = sceKernelGetSystemTimeWide();
   }
-  return n;
+  return submitted == n ? n : -1;
+}
+
+bool wifiturbo_apply_pending(void) {
+  return last_apply_us != 0 && sceKernelGetSystemTimeWide() - last_apply_us < APPLY_SETTLE_US;
 }
 
 /*
@@ -303,12 +346,21 @@ bool wifiturbo_sample_link(wifiturbo_sample *sample) {
   if (!wifiturbo_present()) {
     return false;
   }
-  WqLinkInternals link;
-  memset(&link, 0, sizeof(link));
-  if (wqChipObserveGetLink(&link) == WQ_OK && link.valid) {
-    sample->link = true;
-    sample->snr_db = link.snr_db;
-    sample->noise_floor_dbm = link.noise_floor_dbm;
+  // The first call installs a hook in the Wi-Fi driver, which the plugin only
+  // does while connected, not in the middle of a reconnect
+  int net_state = 0;
+  if (sceNetCtlInetGetState(&net_state) >= 0 && net_state == SCE_NETCTL_STATE_CONNECTED) {
+    // The kernel copies its own idea of the struct's size, as for the settings
+    union {
+      WqLinkInternals link;
+      char room[64];
+    } buffer;
+    memset(&buffer, 0, sizeof(buffer));
+    if (wqChipObserveGetLink(&buffer.link) == WQ_OK && buffer.link.valid) {
+      sample->link = true;
+      sample->snr_db = buffer.link.snr_db;
+      sample->noise_floor_dbm = buffer.link.noise_floor_dbm;
+    }
   }
   WqUiState state;
   if (read_state(&state)) {

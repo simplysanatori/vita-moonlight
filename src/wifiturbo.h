@@ -8,9 +8,18 @@
 // nothing, and costs nothing, when the plugin isn't installed. Declarations
 // copied from the plugin are in third_party/wifiturbo/.
 
-// Whether the plugin's kernel module is loaded. The first call asks it; the
-// answer is kept.
+// Finds out whether the plugin is installed, without calling it unless the
+// system resolved its imports. Call once at start-up, from the main thread,
+// before anything else here; wifiturbo_present() answers false until then.
+void wifiturbo_init(void);
+
+// Whether the plugin's kernel module is loaded, as wifiturbo_init() found.
+// Safe from any thread.
 bool wifiturbo_present(void);
+
+// True for a while after wifiturbo_apply_recommended(): the plugin is still
+// carrying the changes out, and what it reports is out of date
+bool wifiturbo_apply_pending(void);
 
 // Looks at the plugin's settings before a stream starts, and keeps a one-line
 // notice for wifiturbo_stream_notice() when one of them can interrupt the
@@ -26,8 +35,8 @@ const char *wifiturbo_stream_notice(void);
 // when the plugin isn't there or its settings can't be read.
 int wifiturbo_advice_details(char *out, size_t size);
 
-// A short summary for a Settings row: "Settings look fine", "2 to change",
-// or "not installed"
+// A short summary for a Settings row: "good for streaming", "2 to change",
+// "applying changes", or "unavailable"
 void wifiturbo_advice_value(char *out, size_t size);
 
 // Writes what wifiturbo_apply_recommended() would change, for a confirmation

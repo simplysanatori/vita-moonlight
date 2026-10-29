@@ -69,6 +69,7 @@
 #include "debug.h"
 #include "stats.h"
 #include "bench.h"
+#include "wifiturbo.h"
 #include "check_dir.h"
 
 #define VITA_NET_MEM_SIZE 1 * 1024 * 1024
@@ -214,6 +215,8 @@ int main(int argc, char* argv[]) {
   config.log_file = fopen(log_path, "w");
   // After the log opens, so a failure to read the nickname is recorded
   set_pairing_device_name();
+  // Once, here on the one thread running, so nothing else has to ask the plugin
+  wifiturbo_init();
 
   load_all_known_devices();
   vita_debug_log_thread("main");
