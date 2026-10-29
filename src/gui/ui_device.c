@@ -35,6 +35,7 @@ int end_search_thread(SceUID thid);
 #include <Limelight.h>
 #include <client.h>
 #include <errors.h>
+#include "threadplan.h"
 
 #define MILLISECOND 1000
 #define SECOND      (1000 * MILLISECOND)
@@ -165,7 +166,7 @@ SceUID start_search_thread() {
   stop_search_thread_if_running();
   vita_debug_log("[mDNS] start_search_thread: limpiando y creando hilo\n");
   clear_devices();
-  SceUID thid = sceKernelCreateThread("mdns", mdns_discovery_main, 0x10000100, 0x10000, 0, 0, NULL);
+  SceUID thid = threadplan_create("mdns", mdns_discovery_main, 0x10000100, 0x10000);
   if (thid < 0) {
     vita_debug_log("[mDNS] Error creando hilo de búsqueda\n");
     return -1;

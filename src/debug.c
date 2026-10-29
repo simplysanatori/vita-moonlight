@@ -27,6 +27,7 @@
 #include "../src/gui/mdns_log.h"
 #include "debug.h"
 #include "config.h"
+#include "threadplan.h"
 
 pthread_mutex_t print_mutex;
 // Taken by whoever writes the log buffer out, one at a time
@@ -127,8 +128,9 @@ static bool debug_start_buffering(void) {
   log_length = 0;
   log_dropped = 0;
   if (!log_thread_started) {
-    SceUID thid = sceKernelCreateThread("debug_log_flush", debug_flush_thread, LOG_THREAD_PRIORITY,
-                                        LOG_THREAD_STACK_SIZE, 0, 0, NULL);
+    // threadplan_create doesn't log, so it's safe with print_mutex held
+    SceUID thid = threadplan_create("debug_log_flush", debug_flush_thread, LOG_THREAD_PRIORITY,
+                                    LOG_THREAD_STACK_SIZE);
     if (thid >= 0 && sceKernelStartThread(thid, 0, NULL) >= 0) {
       log_thread_started = true;
       // exit() from the UI (Quit) must not lose what hasn't been written yet
@@ -236,7 +238,7 @@ void vita_debug_log_thread(const char *label) {
     return;
   }
 
-  vita_debug_log("[THREAD] %s (%s): priority init 0x%x current 0x%x, affinity init 0x%x current 0x%x, cpu %d",
+  vita_debug_log("[THREAD] %s (%s): priority init %d current %d, affinity init 0x%x current 0x%x, cpu %d, stack %u",
                  label, info.name, info.initPriority, info.currentPriority,
-                 info.initCpuAffinityMask, info.currentCpuAffinityMask, info.currentCpuId);
+                 info.initCpuAffinityMask, info.currentCpuAffinityMask, info.currentCpuId, (unsigned)info.stackSize);
 }

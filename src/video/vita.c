@@ -20,6 +20,7 @@
 #include "../video.h"
 #include "../config.h"
 #include "../debug.h"
+#include "../threadplan.h"
 #include "../gui/guilib.h"
 #include "../util.h"
 #include "../input/vita.h"
@@ -328,6 +329,7 @@ void update_scaling_settings(int width, int height) {
 }
 
 static int vita_pacer_thread_main(SceSize args, void *argp) {
+  vita_debug_log_thread("frame pacer");
   // 1s
   int wait = 1000000;
   //float max_fps = 0;
@@ -620,7 +622,7 @@ static int vita_setup(int videoFormat, int width, int height, int redrawRate, vo
 
   if (video_status == INIT_AVC_DEC) {
     // INIT_FRAME_PACER_THREAD
-    ret = sceKernelCreateThread("frame_pacer", vita_pacer_thread_main, 0, 0x10000, 0, 0, NULL);
+    ret = threadplan_create("frame_pacer", vita_pacer_thread_main, 0, 0x10000);
     if (ret < 0) {
       printf("sceKernelCreateThread 0x%x\n", ret);
       ret = VITA_VIDEO_ERROR_CREATE_PACER_THREAD;

@@ -62,6 +62,7 @@ typedef struct _CONFIGURATION {
   struct special_keys special_keys;
   bool disable_powersave;
   bool boost_clocks;
+  bool pin_threads; // pin the receive, decode and audio threads to their own cores (threadplan.c)
   bool direct_decode; // decode on common-c's receive thread, as before the decode thread
   bool input_sync_to_controller; // pace input reads to controller samples instead of 2 ms polling
   // Developer options, shown in Settings after L + R + triangle

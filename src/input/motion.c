@@ -5,6 +5,7 @@
 #include "Limelight.h"
 #include "motion.h"
 #include "../debug.h"
+#include "../threadplan.h"
 #include "vita.h"
 
 #include "psp2/power.h"
@@ -44,14 +45,14 @@ bool vita_motion_init() {
     sceMotionStartSampling();
     sceMotionReset();
 
-    SceUID thid = sceKernelCreateThread("vitainput_motion_gyro_thread", vitainput_motion_gyro_thread, 0, 0x40000, 0, 0, NULL);
+    SceUID thid = threadplan_create("vitainput_motion_gyro_thread", vitainput_motion_gyro_thread, 0, 0x40000);
     if (thid >= 0) {
         sceKernelStartThread(thid, 0, NULL);
     } else {
       return false;
     }
 
-    thid = sceKernelCreateThread("vitainput_motion_accel_thread", vitainput_motion_accel_thread, 0, 0x40000, 0, 0, NULL);
+    thid = threadplan_create("vitainput_motion_accel_thread", vitainput_motion_accel_thread, 0, 0x40000);
     if (thid >= 0) {
         sceKernelStartThread(thid, 0, NULL);
         return true;
@@ -61,8 +62,13 @@ bool vita_motion_init() {
 }
 
 int vitainput_motion_gyro_thread(SceSize args, void *argp) {
+  bool logged = false;
   while (1) {
     if (motion_state.motion_type_gyro_enabled == true && active_motion_threads == true) {
+      if (!logged) {
+        vita_debug_log_thread("motion gyro");
+        logged = true;
+      }
       motion_process_gyro();
 
       //TODO: Reporting battery events more than one time per second seems unwise
@@ -89,8 +95,13 @@ int vitainput_motion_gyro_thread(SceSize args, void *argp) {
 }
 
 int vitainput_motion_accel_thread(SceSize args, void *argp) {
+  bool logged = false;
   while (1) {
     if (motion_state.motion_type_accel_enabled == true && active_motion_threads == true) {
+      if (!logged) {
+        vita_debug_log_thread("motion accel");
+        logged = true;
+      }
       motion_process_accel();
     } else {
       sceKernelDelayThread(1000000);
