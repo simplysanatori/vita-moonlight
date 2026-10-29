@@ -47,11 +47,12 @@ bool vita_debug_init() {
 // input threads (on dropped frames, touch events, common-c's own logging), so
 // it only copies the line into a buffer. A low priority thread writes the
 // buffer out every LOG_FLUSH_INTERVAL_US, and vita_debug_flush() does the same
-// on demand (end of a stream, exit). A crash can lose the last half second.
+// on demand (end of a stream, exit). A crash can lose the last quarter second.
 #define LOG_BUFFER_SIZE (64 * 1024)
-#define LOG_FLUSH_INTERVAL_US (500 * 1000)
-#define LOG_THREAD_PRIORITY 191
-#define LOG_THREAD_STACK_SIZE 0x10000
+#define LOG_FLUSH_INTERVAL_US (250 * 1000)
+// Below the menu and the streaming threads (higher numbers are lower on the Vita)
+#define LOG_THREAD_PRIORITY (0x10000100 + 16)
+#define LOG_THREAD_STACK_SIZE 0x4000
 #define LOG_LINE_SIZE 8192
 #define LOG_TIMESTAMP_SIZE 25
 
@@ -62,8 +63,15 @@ static char *log_spare = NULL;
 static size_t log_length = 0;
 static unsigned log_dropped = 0;
 static bool log_thread_started = false;
-static void debug_drain(void) {
+// Set by the exit handler, after which only it touches the FILE
+static volatile bool log_exiting = false;
+
+static void debug_drain(bool from_thread) {
   pthread_mutex_lock(&flush_mutex);
+  if (from_thread && log_exiting) {
+    pthread_mutex_unlock(&flush_mutex);
+    return;
+  }
   pthread_mutex_lock(&print_mutex);
   char *out = log_buffer;
   size_t length = log_length;
@@ -72,8 +80,8 @@ static void debug_drain(void) {
     log_buffer = log_spare;
     log_spare = out;
     log_length = 0;
-    log_dropped = 0;
   }
+  log_dropped = 0;
   pthread_mutex_unlock(&print_mutex);
 
   if (config.log_file && (length > 0 || dropped > 0)) {
@@ -89,11 +97,17 @@ static void debug_drain(void) {
 }
 
 static int debug_flush_thread(SceSize args, void *argp) {
-  while (1) {
+  while (!log_exiting) {
     sceKernelDelayThread(LOG_FLUSH_INTERVAL_US);
-    debug_drain();
+    debug_drain(true);
   }
   return 0;
+}
+
+// exit() runs this before newlib closes the log file
+static void debug_flush_at_exit(void) {
+  log_exiting = true;
+  debug_drain(false);
 }
 
 // Call with print_mutex held. Returns false when there is nowhere to put lines.
@@ -118,7 +132,7 @@ static bool debug_start_buffering(void) {
     if (thid >= 0 && sceKernelStartThread(thid, 0, NULL) >= 0) {
       log_thread_started = true;
       // exit() from the UI (Quit) must not lose what hasn't been written yet
-      atexit(vita_debug_flush);
+      atexit(debug_flush_at_exit);
     }
   }
   return true;
@@ -128,7 +142,7 @@ void vita_debug_flush(void) {
   if (!log_buffer) {
     return;
   }
-  debug_drain();
+  debug_drain(false);
 }
 
 // When save_debug_log is on, every call allocates 8 KB and takes a global
@@ -177,8 +191,12 @@ void vita_debug_log(const char *s, ...) {
   }
 
   pthread_mutex_lock(&print_mutex);
+  bool direct = false;
   if (config.log_file) {
-    if (!debug_start_buffering() || log_length + line_length > LOG_BUFFER_SIZE) {
+    if (!debug_start_buffering()) {
+      // No buffer to put it in: write it out ourselves, as before
+      direct = true;
+    } else if (log_length + line_length > LOG_BUFFER_SIZE) {
       log_dropped++;
     } else {
       memcpy(&log_buffer[log_length], buffer, line_length);
@@ -191,12 +209,16 @@ void vita_debug_log(const char *s, ...) {
   }
   pthread_mutex_unlock(&print_mutex);
 
-  free(buffer);
-
-  // Without the flush thread, write each line out as it comes, as before
-  if (config.log_file && !log_thread_started) {
-    debug_drain();
+  if (direct) {
+    pthread_mutex_lock(&flush_mutex);
+    fwrite(buffer, 1, line_length, config.log_file);
+    fflush(config.log_file);
+    pthread_mutex_unlock(&flush_mutex);
+  } else if (config.log_file && !log_thread_started) {
+    // Without the flush thread, write each line out as it comes, as before
+    debug_drain(false);
   }
+  free(buffer);
 }
 
 // Logs the calling thread's scheduling state, to check which priority and cores
