@@ -84,8 +84,9 @@ Not worth doing for now:
 | Setting | Recommendation | Why |
 |---|---|---|
 | FPS | Match the host desktop's refresh rate (60 on a 60 Hz desktop) | A 50/60 mismatch measured ~30 ms slower |
-| Frame pacer | Off | It drops decoded frames periodically |
-| V-Sync (Enable VITA vblank) | Off | It adds up to a frame of latency |
+| Frame pacing | Smooth (Off for the lowest latency) | Shows exactly one frame per refresh from a one-frame queue, so Wi-Fi bursts play out evenly; costs about 17 ms |
+| Frame pacer | Off | It drops decoded frames periodically; only used when Frame pacing is Off |
+| V-Sync (Enable VITA vblank) | Off | It adds up to a frame of latency; not used when Frame pacing is Smooth |
 | Stats overlay | Off when not diagnosing | It costs ~1 ms of draw time per frame |
 | Clock boost | On | Faster depacketising, FEC, audio and draw |
 | Fast colour decoding (`decode_yuv`) | On (the default) | The decoder outputs YUV and the GPU converts it while drawing: about 2 ms less decode per frame |

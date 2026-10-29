@@ -250,6 +250,16 @@ static bool audio_packet_change(int step) {
   return true;
 }
 
+static void frame_pacing_value(char *out, size_t size) {
+  snprintf(out, size, "%s", config.frame_pacing == FRAME_PACING_SMOOTH ? "Smooth (1-frame buffer)" : "Off (lowest latency)");
+}
+
+static bool frame_pacing_change(int step) {
+  (void)step;
+  config.frame_pacing = config.frame_pacing == FRAME_PACING_SMOOTH ? FRAME_PACING_OFF : FRAME_PACING_SMOOTH;
+  return true;
+}
+
 static void stats_overlay_value(char *out, size_t size) {
   static const char *const names[STATS_OVERLAY_COUNT] = {"off", "fps", "full"};
   snprintf(out, size, "%s", names[config.stats_overlay]);
@@ -515,16 +525,24 @@ const setting_def SETTINGS[] = {
    .label = "Enable VITA vblank", .is_on = vblank_wait_on, .change = vblank_wait_flip,
    .help = "V-Sync. Waits for the screen to finish a refresh before showing the next frame. Stops "
       "lines tearing across the picture, but can add up to a frame of input lag. Off feels "
-      "snappier, on looks cleaner."},
+      "snappier, on looks cleaner. Not used when Frame pacing is Smooth, which always waits "
+      "for the refresh."},
   {.tab = SETTINGS_TAB_STREAM, .kind = SETTING_TOGGLE, .flags = SETTING_NEEDS_NEW_STREAM,
    .label = "Fill screen (crop edges)", .is_on = fill_screen_on, .change = fill_screen_flip,
    .help = "When the stream's shape doesn't match the Vita's screen, for example a 4:3 or "
       "ultrawide game, zoom in and crop the edges to fill the screen instead of showing black"
       " bars. You may lose some of the picture at the edges."},
+  {.tab = SETTINGS_TAB_STREAM, .kind = SETTING_CHOICE, .flags = SETTING_NEEDS_NEW_STREAM | SETTING_CONFIRM_STEPS,
+   .label = "Frame pacing", .value = frame_pacing_value, .change = frame_pacing_change,
+   .help = "How frames reach the screen. Smooth shows exactly one frame per screen refresh from a "
+      "short queue, so frames that arrive late or in a bunch over Wi-Fi play out evenly instead "
+      "of skipping and stuttering. It adds about one frame (17 ms) of delay. Off shows each "
+      "frame the moment it is ready: the lowest delay, but less even on a weak connection. "
+      "With Smooth, V-Sync and the frame pacer below are not used."},
   {.tab = SETTINGS_TAB_STREAM, .kind = SETTING_TOGGLE,
    .label = "Enable frame pacer", .is_on = frame_pacer_on, .change = frame_pacer_flip,
-   .help = "Throws away extra frames when more arrive than your FPS setting. It can cause a small "
-      "hitch every few seconds, so off is recommended."},
+   .help = "Only used when Frame pacing is Off. Throws away extra frames when more arrive than "
+      "your FPS setting. It can cause a small hitch every few seconds, so off is recommended."},
   {.tab = SETTINGS_TAB_STREAM, .kind = SETTING_CHOICE, .flags = SETTING_NEEDS_NEW_STREAM | SETTING_CONFIRM_STEPS,
    .label = "Video packet size", .value = packet_size_value, .change = packet_size_change,
    .help = "How big each chunk of video sent over Wi-Fi is. 1392 sends fewer chunks per frame, "

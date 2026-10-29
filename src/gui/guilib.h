@@ -5,6 +5,11 @@
 
 #include <psp2/touch.h>
 
+// Ends the frame the menu is drawing and shows it. A caller about to hand vita2d
+// to the stream (resuming it) does this first, so the stream's frames never
+// start inside the menu's.
+void ui_end();
+
 #define WIDTH 960
 #define HEIGHT 544
 

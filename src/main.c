@@ -65,6 +65,7 @@
 #include "util.h"
 #include "power/vita.h"
 #include "input/motion.h"
+#include "video/vita.h"
 
 #include "debug.h"
 #include "stats.h"
@@ -148,6 +149,11 @@ static void vita_init() {
 
   if (!vitabench_init()) {
     printf("Benchmark mutex init failed!");
+    loop_forever();
+  }
+
+  if (!vitavideo_init()) {
+    printf("Video mutex init failed!");
     loop_forever();
   }
 }
