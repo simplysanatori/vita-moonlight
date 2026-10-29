@@ -91,6 +91,9 @@ typedef struct _CONFIGURATION {
   int inputsCount;
   int mouse_acceleration;
   bool enable_ref_frame_invalidation;
+  // Advanced, ini only: with reference frame invalidation, tell the decoder the
+  // DPB is one frame (see GS_SPS_RFI_MIN_DPB_HINT)
+  bool rfi_min_dpb_hint;
   bool enable_vita_vblank_wait;
   bool enable_motion_controls; //Metalface
   bool enable_psbutton_capture;

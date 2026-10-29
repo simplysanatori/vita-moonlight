@@ -122,6 +122,14 @@ void debug_bytes(uint8_t* buf, int len)
 
 
 
+// A value in an SPS that doesn't fit what it indexes. Reading on would run off the
+// end of an array, so make the reader see an overrun: read_nal_unit then fails and
+// the caller passes the SPS through untouched
+static void bs_poison(bs_t* b)
+{
+    b->p = b->end + 1;
+}
+
 void read_seq_parameter_set_rbsp(h264_stream_t* h, bs_t* b);
 void read_scaling_list(bs_t* b, int* scalingList, int sizeOfScalingList, int* useDefaultScalingMatrixFlag );
 void read_vui_parameters(h264_stream_t* h, bs_t* b);
@@ -300,6 +308,11 @@ void read_seq_parameter_set_rbsp(h264_stream_t* h, bs_t* b)
         sps->offset_for_non_ref_pic = bs_read_se(b);
         sps->offset_for_top_to_bottom_field = bs_read_se(b);
         sps->num_ref_frames_in_pic_order_cnt_cycle = bs_read_ue(b);
+        if( (unsigned)sps->num_ref_frames_in_pic_order_cnt_cycle > 255 )
+        {
+            sps->num_ref_frames_in_pic_order_cnt_cycle = 0;
+            bs_poison(b);
+        }
         for( i = 0; i < sps->num_ref_frames_in_pic_order_cnt_cycle; i++ )
         {
             sps->offset_for_ref_frame[ i ] = bs_read_se(b);
@@ -330,7 +343,11 @@ void read_seq_parameter_set_rbsp(h264_stream_t* h, bs_t* b)
     }
     read_rbsp_trailing_bits(h, b);
 
-    if( 1 )
+    if( (unsigned)sps->seq_parameter_set_id > 31 )
+    {
+        bs_poison(b);
+    }
+    else if( 1 )
     {
         memcpy(h->sps_table[sps->seq_parameter_set_id], h->sps, sizeof(sps_t));
     }
@@ -452,6 +469,11 @@ void read_hrd_parameters(h264_stream_t* h, bs_t* b)
     sps_t* sps = h->sps;
 
     sps->hrd.cpb_cnt_minus1 = bs_read_ue(b);
+    if( (unsigned)sps->hrd.cpb_cnt_minus1 > 31 )
+    {
+        sps->hrd.cpb_cnt_minus1 = 0;
+        bs_poison(b);
+    }
     sps->hrd.bit_rate_scale = bs_read_u(b, 4);
     sps->hrd.cpb_size_scale = bs_read_u(b, 4);
     for( int SchedSelIdx = 0; SchedSelIdx <= sps->hrd.cpb_cnt_minus1; SchedSelIdx++ )

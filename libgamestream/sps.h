@@ -22,6 +22,11 @@
 #define GS_SPS_BITSTREAM_FIXUP  0x01
 #define GS_SPS_REMOVE_VST_FIXUP 0x02
 #define GS_SPS_REMOVE_CLI_FIXUP 0x04
+// Experiment for reference frame invalidation: keep the host's num_ref_frames but
+// write max_dec_frame_buffering = 1, so a decoder that outputs when its DPB
+// fills (rather than on num_reorder_frames) doesn't hold pictures back. Not
+// spec-conformant
+#define GS_SPS_RFI_MIN_DPB_HINT 0x08
 
 void gs_sps_init(int width, int height);
 void gs_sps_fix(PLENTRY sps, int flags, uint8_t* out_buf, uint32_t* out_offset, int max_ref_frames);

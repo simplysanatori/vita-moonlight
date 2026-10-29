@@ -87,7 +87,9 @@ static void copy_sps_unchanged(PLENTRY sps, uint8_t* out_buf, uint32_t* out_offs
 void gs_sps_fix(PLENTRY sps, int flags, uint8_t* out_buf, uint32_t* out_offset, int max_ref_frames) {
   int start_len = sps->data[2] == 0x01 ? 3 : 4;
 
-  if (read_nal_unit(h264_stream, sps->data+start_len, sps->length-start_len) < 0) {
+  // The host decides what is in here, so only hand the parser what claims to be an SPS
+  if (sps->length <= start_len + 1 || (sps->data[start_len] & 0x1F) != NAL_UNIT_TYPE_SPS ||
+      read_nal_unit(h264_stream, sps->data+start_len, sps->length-start_len) < 0) {
     vita_debug_log("SPS: can't parse it, passing it on unchanged\n");
     copy_sps_unchanged(sps, out_buf, out_offset);
     return;
@@ -96,9 +98,10 @@ void gs_sps_fix(PLENTRY sps, int flags, uint8_t* out_buf, uint32_t* out_offset, 
   int host_refs = h264_stream->sps->num_ref_frames;
   int host_level = h264_stream->sps->level_idc;
   // Macroblocks in a frame, which with the level says how many frames fit in the DPB
-  int frame_mbs = (h264_stream->sps->pic_width_in_mbs_minus1 + 1)
-                  * (h264_stream->sps->pic_height_in_map_units_minus1 + 1)
-                  * (h264_stream->sps->frame_mbs_only_flag ? 1 : 2);
+  long long frame_mbs_wide = (long long)(h264_stream->sps->pic_width_in_mbs_minus1 + 1)
+                             * (h264_stream->sps->pic_height_in_map_units_minus1 + 1)
+                             * (h264_stream->sps->frame_mbs_only_flag ? 1 : 2);
+  int frame_mbs = frame_mbs_wide > 1000000 ? 1000000 : (int)frame_mbs_wide;
 
   if (max_ref_frames < 1)
     max_ref_frames = 1;
@@ -108,7 +111,7 @@ void gs_sps_fix(PLENTRY sps, int flags, uint8_t* out_buf, uint32_t* out_offset, 
   // Some decoders requires a reference frame count of 1 to decode successfully.
   // With reference frame invalidation the host needs more than that, so leave
   // its count alone unless the decoder can't hold it.
-  if (max_ref_frames == 1 || host_refs > max_ref_frames)
+  if (max_ref_frames == 1 || host_refs < 0 || host_refs > max_ref_frames)
     h264_stream->sps->num_ref_frames = max_ref_frames;
 
   // Some decoders rely on H264 level to decide how many buffers are needed
@@ -131,8 +134,10 @@ void gs_sps_fix(PLENTRY sps, int flags, uint8_t* out_buf, uint32_t* out_offset, 
     h264_stream->sps->vui.chroma_loc_info_present_flag = 0;
 
   if ((flags & GS_SPS_BITSTREAM_FIXUP) == GS_SPS_BITSTREAM_FIXUP) {
-    // Without a VUI the fields below aren't written at all
-    h264_stream->sps->vui_parameters_present_flag = 1;
+    // Without a VUI the fields below aren't written at all. Only with reference
+    // frame invalidation: without it the SPS is rewritten exactly as it always was
+    if (max_ref_frames > 1)
+      h264_stream->sps->vui_parameters_present_flag = 1;
 
     // The SPS that comes in the current H264 bytestream doesn't set the bitstream_restriction_flag
     // or the max_dec_frame_buffering which increases decoding latency on some devices.
@@ -144,14 +149,17 @@ void gs_sps_fix(PLENTRY sps, int flags, uint8_t* out_buf, uint32_t* out_offset, 
       h264_stream->sps->vui.max_bits_per_mb_denom = 1;
       h264_stream->sps->vui.log2_max_mv_length_horizontal = 16;
       h264_stream->sps->vui.log2_max_mv_length_vertical = 16;
+      h264_stream->sps->vui.num_reorder_frames = 0;
     }
 
     // No frame reordering (the stream has no B-frames), so each frame is output as it is decoded
-    h264_stream->sps->vui.num_reorder_frames = 0;
+    if (max_ref_frames > 1)
+      h264_stream->sps->vui.num_reorder_frames = 0;
 
     // Some devices throw errors if max_dec_frame_buffering < num_ref_frames
     h264_stream->sps->vui.max_dec_frame_buffering =
-        h264_stream->sps->num_ref_frames > 1 ? h264_stream->sps->num_ref_frames : 1;
+        ((flags & GS_SPS_RFI_MIN_DPB_HINT) || h264_stream->sps->num_ref_frames <= 1)
+            ? 1 : h264_stream->sps->num_ref_frames;
 
     // These values are the default for the fields, but they are more aggressive
     // than what GFE sends in 2.5.11, but it doesn't seem to cause picture problems.
