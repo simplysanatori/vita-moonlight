@@ -8,6 +8,7 @@
 #include "input/touchabsolute.h"
 #include "input/swap_shoulder_buttons.h"
 #include "session.h"
+#include "wifiturbo.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -51,6 +52,7 @@ TOGGLE(local_audio, config.localaudio)
 TOGGLE(debug_log, config.save_debug_log)
 TOGGLE(powersave, config.disable_powersave)
 TOGGLE(boost_clocks, config.boost_clocks)
+TOGGLE(wifiturbo_notices, config.wifiturbo_notices)
 TOGGLE(jp_layout, config.jp_layout)
 TOGGLE(input_sync, config.input_sync_to_controller)
 TOGGLE(motion, config.enable_motion_controls)
@@ -368,6 +370,28 @@ static void mapping_help(char *out, size_t size) {
 }
 
 /*
+ * Wi-Fi Turbo, the Wi-Fi plugin, when it is installed
+ */
+
+// Applying changes the plugin's settings and can reconnect Wi-Fi, which would
+// end a stream
+static bool wifiturbo_apply_listed(void) {
+  return wifiturbo_present() && !settings_streaming();
+}
+
+static void wifiturbo_check_help(char *out, size_t size) {
+  char details[800];
+  int count = wifiturbo_advice_details(details, sizeof(details));
+  if (count < 0) {
+    snprintf(out, size, "Couldn't read the Wi-Fi Turbo plugin's settings.");
+  } else if (count == 0) {
+    snprintf(out, size, "None of the Wi-Fi Turbo settings that can interrupt a stream are set.");
+  } else {
+    snprintf(out, size, "%s\n\nChange these in the Vita's Settings, under Network, Wi-Fi Turbo.", details);
+  }
+}
+
+/*
  * The benchmark, against the computer Settings was opened from
  */
 
@@ -530,6 +554,22 @@ const setting_def SETTINGS[] = {
    .help = "How a PC's games and apps are listed when you connect to it. Box art: a row of game "
       "covers to scroll through with left and right. Text: a plain list, which uses less "
       "memory. Covers are saved on the memory card after the first visit."},
+  // Only listed when the Wi-Fi Turbo plugin is installed
+  {.tab = SETTINGS_TAB_SYSTEM, .kind = SETTING_HEADER, .label = "Wi-Fi Turbo", .listed = wifiturbo_present},
+  {.tab = SETTINGS_TAB_SYSTEM, .kind = SETTING_ACTION, .label = "Wi-Fi Turbo settings for streaming",
+   .listed = wifiturbo_present, .value = wifiturbo_advice_value, .action = SETTING_ACTION_SHOW_HELP,
+   .help_with = wifiturbo_check_help},
+  {.tab = SETTINGS_TAB_SYSTEM, .kind = SETTING_TOGGLE, .listed = wifiturbo_present,
+   .label = "Warn about Wi-Fi Turbo settings", .is_on = wifiturbo_notices_on, .change = wifiturbo_notices_flip,
+   .help = "When a stream starts, shows a short message if a Wi-Fi Turbo setting can interrupt it, such "
+      "as Smart Mesh Roaming, which scans other channels and can reconnect Wi-Fi mid-stream. "
+      "Moonlight only reads those settings; it never changes them on its own."},
+  {.tab = SETTINGS_TAB_SYSTEM, .kind = SETTING_ACTION, .label = "Apply recommended Wi-Fi Turbo settings",
+   .listed = wifiturbo_apply_listed, .action = SETTING_ACTION_WIFITURBO_APPLY,
+   .help = "Asks Wi-Fi Turbo to turn off Smart Mesh Roaming, 40 MHz and the In-game HUD, and to use Max "
+      "performance, which suits streaming. The plugin saves them, so they stay that way until you "
+      "change them in the Vita's Settings, under Network, Wi-Fi Turbo. Changing 40 MHz or the power "
+      "profile reconnects Wi-Fi for a few seconds. Can't be used during a stream."},
 
   // Controls
   {.tab = SETTINGS_TAB_CONTROLS, .kind = SETTING_TOGGLE,

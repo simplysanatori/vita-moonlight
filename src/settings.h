@@ -40,6 +40,7 @@ typedef enum {
   SETTING_ACTION_RUN_BENCHMARK,
   SETTING_ACTION_HIDE_DEVELOPER,
   SETTING_ACTION_SHOW_HELP,       // nothing to change: confirm explains it
+  SETTING_ACTION_WIFITURBO_APPLY, // the Wi-Fi Turbo plugin's settings for streaming, after a confirmation
 } setting_action;
 
 enum {

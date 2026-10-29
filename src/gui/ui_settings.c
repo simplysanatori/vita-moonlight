@@ -32,6 +32,7 @@
 #include "../util.h"
 #include "ui_recommended.h"
 #include "../settings.h"
+#include "../wifiturbo.h"
 extern char* strdup(const char*);
 
 static unsigned int settings_special_codes[] = {0,
@@ -509,6 +510,30 @@ static int run_action(const setting_def *setting) {
     case SETTING_ACTION_SHOW_HELP:
       show_settings_help(setting);
       return 0;
+    case SETTING_ACTION_WIFITURBO_APPLY: {
+      char changes[256];
+      bool reconnects;
+      int count = wifiturbo_recommended_changes(changes, sizeof(changes), &reconnects);
+      if (count < 0) {
+        display_error("Couldn't read the Wi-Fi Turbo plugin's settings.");
+      } else if (count == 0) {
+        flash_message("Wi-Fi Turbo is already set for streaming.");
+      } else {
+        char message[512];
+        snprintf(message, sizeof(message),
+                 "Wi-Fi Turbo will be set to: %s. The plugin saves these.%s\n\nContinue?", changes,
+                 reconnects ? " This reconnects Wi-Fi for a few seconds, and the PC list may "
+                              "show errors until it's back." : "");
+        if (display_confirm(message)) {
+          if (wifiturbo_apply_recommended() < 0) {
+            display_error("Wi-Fi Turbo didn't accept the change.");
+          } else {
+            flash_message("Wi-Fi Turbo is applying the changes.");
+          }
+        }
+      }
+      return SETTINGS_REBUILD;
+    }
     case SETTING_ACTION_NONE:
       break;
   }
