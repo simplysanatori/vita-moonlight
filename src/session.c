@@ -6,6 +6,7 @@
 #include "netcount.h"
 #include "platform.h"
 #include "video.h"
+#include "wifiturbo.h"
 #include "power/vita.h"
 #include "input/vita.h"
 #include "audio/vita.h"
@@ -161,6 +162,8 @@ static int start_stream(int appId, char *err, size_t err_len) {
 // Starts streaming appId. Returns 0, or a negative code with a message in err,
 // so callers decide whether to show it (the benchmark runs without dialogs).
 int session_start_stream(int appId, char *err, size_t err_len) {
+  // Before the stream, so a notice can show as it starts. Read only.
+  wifiturbo_prestream_check();
   // The launch and the RTSP handshake run at the stream's clocks; once it
   // starts, vitapower_start() keeps them up until it ends
   vitapower_busy_begin();

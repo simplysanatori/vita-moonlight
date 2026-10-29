@@ -1,0 +1,23 @@
+# The vita-turbo-wifi functions Moonlight imports (see wifiturbo_api.h), for
+# vita-libs-gen (CMake runs the classic one). Moonlight links the weak stubs
+# generated from this file, so it still starts when the plugin isn't installed.
+#
+# The plugin exports SceWifiTurbo from its kernel module as a syscall library
+# (wifiturbo_kernel.yml, "syscall: true"), which vita-elf-export lists as
+# "kernel: false" so that user code can import it. The NIDs are what
+# vita-elf-export derives from the plugin's yml, the first 32 bits of the
+# SHA-256 of each name (library version 1): regenerate them with
+# `vita-elf-export kernel <any file> wifiturbo_kernel.yml out.yml` if the
+# plugin ever renames or re-versions the library.
+modules:
+  SceWifiTurbo:
+    libraries:
+      SceWifiTurbo:
+        nid: 0xDDC3C340
+        kernel: false
+        version: 1
+        functions:
+          wqSelfTestPing: 0xE18F2E9A
+          wqUiReadState: 0xCD1D68A4
+          wqUiSubmit: 0x2A3ADF8E
+          wqChipObserveGetLink: 0x106691BF

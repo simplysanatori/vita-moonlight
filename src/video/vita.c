@@ -28,6 +28,7 @@
 #include "sps.h"
 #include "../stats.h"
 #include "../bench.h"
+#include "../wifiturbo.h"
 
 #include <Limelight.h>
 
@@ -251,6 +252,9 @@ static bool decode_yuv = false;
 #define STREAM_HINT_DURATION_US 5000000
 #define STREAM_HINT_FADE_US 1000000
 static const char *STREAM_HINT_TEXT = "Press START + L + R for the menu and to quit";
+// A warning about the Wi-Fi Turbo plugin's settings (src/wifiturbo.c), shown
+// above the hint for longer, as it takes longer to read
+#define STREAM_NOTICE_DURATION_US 9000000
 // When the first frame of this stream was drawn, or 0 before that
 static uint64_t stream_hint_start_us = 0;
 
@@ -853,29 +857,55 @@ void draw_fps() {
   vitastats_draw();
 }
 
+// How visible a message shown for duration_us is after shown_for_us: fully, then
+// fading out over the last second, and 0 once it's over
+static float message_opacity(uint64_t shown_for_us, uint64_t duration_us) {
+  if (shown_for_us >= duration_us) {
+    return 0.0f;
+  }
+  uint64_t remaining = duration_us - shown_for_us;
+  return remaining < STREAM_HINT_FADE_US ? (float)remaining / STREAM_HINT_FADE_US : 1.0f;
+}
+
+// A line of text on a dark bar, centred near the bottom of the screen. Row 0
+// is the lowest; each row after it sits above the last.
+static void draw_message_bar(const char *text, int row, float opacity) {
+  int font_size = 20;
+  int text_width = vita2d_font_text_width(font, font_size, text);
+  // A long line gets smaller type rather than running off the screen
+  while (text_width + 32 > SCREEN_WIDTH - 16 && font_size > 12) {
+    font_size -= 2;
+    text_width = vita2d_font_text_width(font, font_size, text);
+  }
+  int box_width = text_width + 32;
+  int box_height = 36;
+  int box_x = (SCREEN_WIDTH - box_width) / 2;
+  int box_y = SCREEN_HEIGHT - box_height - 24 - row * (box_height + 8);
+  vita2d_draw_rectangle(box_x, box_y, box_width, box_height, RGBA8(0, 0, 0, (uint8_t)(0xB0 * opacity)));
+  vita2d_font_draw_text(font, box_x + 16, box_y + 25, RGBA8(0xFF, 0xFF, 0xFF, (uint8_t)(0xFF * opacity)),
+                        font_size, text);
+}
+
 static void draw_stream_hint(void) {
   uint64_t now = LiGetMicroseconds();
   if (stream_hint_start_us == 0) {
     stream_hint_start_us = now;
   }
   uint64_t shown_for = now - stream_hint_start_us;
-  if (shown_for >= STREAM_HINT_DURATION_US) {
-    return;
+
+  float hint_opacity = message_opacity(shown_for, STREAM_HINT_DURATION_US);
+  if (hint_opacity > 0.0f) {
+    draw_message_bar(STREAM_HINT_TEXT, 0, hint_opacity);
   }
 
-  // Fade out over the last second
-  uint64_t remaining = STREAM_HINT_DURATION_US - shown_for;
-  float opacity = remaining < STREAM_HINT_FADE_US ? (float)remaining / STREAM_HINT_FADE_US : 1.0f;
-
-  const int font_size = 20;
-  int text_width = vita2d_font_text_width(font, font_size, STREAM_HINT_TEXT);
-  int box_width = text_width + 32;
-  int box_height = 36;
-  int box_x = (SCREEN_WIDTH - box_width) / 2;
-  int box_y = SCREEN_HEIGHT - box_height - 24;
-  vita2d_draw_rectangle(box_x, box_y, box_width, box_height, RGBA8(0, 0, 0, (uint8_t)(0xB0 * opacity)));
-  vita2d_font_draw_text(font, box_x + 16, box_y + 25, RGBA8(0xFF, 0xFF, 0xFF, (uint8_t)(0xFF * opacity)),
-                        font_size, STREAM_HINT_TEXT);
+  // Set before the stream started, so nothing is read or asked for here
+  const char *notice = wifiturbo_stream_notice();
+  if (notice != NULL) {
+    float notice_opacity = message_opacity(shown_for, STREAM_NOTICE_DURATION_US);
+    if (notice_opacity > 0.0f) {
+      draw_message_bar(notice, 1, notice_opacity);
+    }
+  }
 }
 
 void draw_indicators() {
