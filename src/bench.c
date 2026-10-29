@@ -797,10 +797,10 @@ static void write_report(FILE *f, const char *started, const char *host, const c
   write_json_string(f, app);
   fprintf(f, ",\n  \"seconds\": %.1f,\n", seconds);
   fprintf(f, "  \"settings\": {\"width\": %d, \"height\": %d, \"fps\": %d, \"bitrate_kbps\": %d, "
-             "\"packet_size\": %d, \"direct_decode\": %s, \"input_sync\": %s, \"boost_clocks\": %s, "
+             "\"packet_size\": %d, \"audio_packet_ms\": %d, \"direct_decode\": %s, \"input_sync\": %s, \"boost_clocks\": %s, "
              "\"frame_pacer\": %s, \"vblank_wait\": %s, \"stats_overlay\": %d, \"debug_log\": %s, \"decode_yuv\": %s},\n",
           config.stream.width, config.stream.height, config.stream.fps, config.stream.bitrate,
-          config.stream.packetSize, config.direct_decode ? "true" : "false",
+          config.stream.packetSize, config.audio_packet_ms, config.direct_decode ? "true" : "false",
           config.input_sync_to_controller ? "true" : "false", config.boost_clocks ? "true" : "false",
           config.enable_frame_pacer ? "true" : "false", config.enable_vita_vblank_wait ? "true" : "false",
           config.stats_overlay, config.save_debug_log ? "true" : "false", config.decode_yuv ? "true" : "false");

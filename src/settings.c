@@ -236,6 +236,17 @@ static bool packet_size_change(int step) {
   return true;
 }
 
+static void audio_packet_value(char *out, size_t size) {
+  snprintf(out, size, "%d ms", config.audio_packet_ms);
+}
+
+static bool audio_packet_change(int step) {
+  (void)step;
+  // Only two choices, so either direction switches
+  config.audio_packet_ms = config.audio_packet_ms == 10 ? 5 : 10;
+  return true;
+}
+
 static void stats_overlay_value(char *out, size_t size) {
   static const char *const names[STATS_OVERLAY_COUNT] = {"off", "fps", "full"};
   snprintf(out, size, "%s", names[config.stats_overlay]);
@@ -502,6 +513,11 @@ const setting_def SETTINGS[] = {
    .label = "Enable local audio", .is_on = local_audio_on, .change = local_audio_flip,
    .help = "Also plays the game's sound on your PC's speakers. Off keeps the PC quiet and sends "
       "the sound only to the Vita."},
+  {.tab = SETTINGS_TAB_STREAM, .kind = SETTING_CHOICE, .flags = SETTING_NEEDS_NEW_STREAM,
+   .label = "Audio packet length", .value = audio_packet_value, .change = audio_packet_change,
+   .help = "How much sound each Wi-Fi packet carries. 10 ms sends half as many audio packets, "
+      "which can help on a crowded 2.4 GHz network, for 5 ms more audio delay. 5 ms has the "
+      "least delay. A host that doesn't support 10 ms keeps sending 5 ms, which still plays."},
 
   // System
   {.tab = SETTINGS_TAB_SYSTEM, .kind = SETTING_TOGGLE,

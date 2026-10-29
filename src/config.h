@@ -53,6 +53,7 @@ typedef struct _CONFIGURATION {
   char key_dir[4096];
   bool sops;
   bool localaudio;
+  int audio_packet_ms; // 5 (default) or 10; longer packets mean fewer of them on the air
   bool fullscreen;
   bool forcehw;
   bool unsupported_version;
