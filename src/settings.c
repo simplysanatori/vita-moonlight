@@ -479,7 +479,8 @@ const setting_def SETTINGS[] = {
   {.tab = SETTINGS_TAB_STREAM, .kind = SETTING_TOGGLE, .flags = SETTING_NEEDS_NEW_STREAM,
    .label = "Enable reference frame invalidation", .is_on = frame_inval_on, .change = frame_inval_flip,
    .help = "Fixes glitches from lost video faster, without waiting for a whole new picture. Needs "
-      "support from your PC. If you see corrupted video that doesn't clear up, turn this off."},
+      "support from your PC, which works best with an NVIDIA graphics card. Uses more of "
+      "the Vita's memory. If you see corrupted video that doesn't clear up, turn this off."},
   {.tab = SETTINGS_TAB_STREAM, .kind = SETTING_TOGGLE, .flags = SETTING_NEEDS_NEW_STREAM,
    .label = "Enable stream optimization", .is_on = stream_optimize_on, .change = stream_optimize_flip,
    .help = "Tunes the stream for playing over the internet, away from home. Leave it off on your "

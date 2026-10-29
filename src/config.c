@@ -174,6 +174,8 @@ static int ini_handle(void *out, const char *section, const char *name,
       config->mouse_acceleration = INT(value);
     } else if (strcmp(name, "enable_ref_frame_invalidation") == 0) {
       config->enable_ref_frame_invalidation = BOOL(value);
+    } else if (strcmp(name, "rfi_min_dpb_hint") == 0) {
+      config->rfi_min_dpb_hint = BOOL(value);
     } else if (strcmp(name, "enable_remote_stream_optimization") == 0) {
       config->stream.streamingRemotely = INT(value);
     } else if (strcmp(name, "enable_vita_vblank_wait") == 0) {
@@ -271,6 +273,7 @@ bool config_save(const char* filename, PCONFIGURATION config) {
 
   write_config_int(fd, "mouse_acceleration", config->mouse_acceleration);
   write_config_bool(fd, "enable_ref_frame_invalidation", config->enable_ref_frame_invalidation);
+  write_config_bool(fd, "rfi_min_dpb_hint", config->rfi_min_dpb_hint);
   write_config_int(fd, "enable_remote_stream_optimization", config->stream.streamingRemotely);
   write_config_bool(fd, "enable_vita_vblank_wait", config->enable_vita_vblank_wait);
   write_config_bool(fd, "enable_motion_controls", config->enable_motion_controls);
@@ -386,6 +389,7 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
 
   config->mouse_acceleration = 150;
   config->enable_ref_frame_invalidation = false;
+  config->rfi_min_dpb_hint = false;
   config->enable_vita_vblank_wait = false;
   config->enable_psbutton_capture = true;
   config->enable_double_tap_sprint = false;

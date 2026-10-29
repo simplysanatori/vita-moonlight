@@ -107,6 +107,117 @@ SceUID pacer_thread = -1;
 SceVideodecQueryInitInfoHwAvcdec *init = NULL;
 SceAvcdecQueryDecoderInfo *decoder_info = NULL;
 
+// Reference frames the decoder is created with when reference frame invalidation
+// is on, largest first: after a lost frame the host encodes against an older
+// picture than the last one, and the decoder has to still hold it
+static const int RFI_REF_FRAME_CANDIDATES[] = {16, 8, 5};
+// The fewest references reference frame invalidation may get, whatever they cost:
+// NVENC's default count, so the SPS never has to lie about it
+#define RFI_MIN_REF_FRAMES 5
+// What the decoder is created with without it, when the SPS says there is just one
+#define DEFAULT_REF_FRAMES 4
+// The most the decoder's memblock may take from PHYCONT, which defaults to 26 MiB
+// and has to share it. 16 references fit at 960x544, but not at 1280x720. Counts
+// above RFI_MIN_REF_FRAMES are held to it
+#define RFI_DECODER_MEM_LIMIT (16 * 1024 * 1024)
+// What gs_sps_fix may keep of the host's num_ref_frames: the decoder's count with
+// reference frame invalidation on, 1 without
+static int sps_ref_frames = 1;
+// The flags gs_sps_fix gets, fixed for a stream at setup
+static int sps_flags = GS_SPS_BITSTREAM_FIXUP;
+// Successful decodes since the decoder last output a picture: above 0, it holds
+// pictures back
+static int decodes_without_output = 0;
+static int worst_output_lag = 0;
+// The resume keyframe decoded but hasn't come out yet
+static bool recovery_output_pending = false;
+
+// Whether a decoder for refs reference frames can be created at this size, tried
+// out and released again. mem_size is the memblock it takes. With capped, a
+// memblock over RFI_DECODER_MEM_LIMIT fails it.
+static bool vita_probe_ref_frames(int refs, bool capped, unsigned horizontal, unsigned vertical, size_t *mem_size) {
+  *mem_size = 0;
+
+  SceVideodecQueryInitInfoHwAvcdec probe_init = {0};
+  probe_init.size = sizeof(probe_init);
+  probe_init.horizontal = horizontal;
+  probe_init.vertical = vertical;
+  probe_init.numOfRefFrames = refs;
+  probe_init.numOfStreams = 1;
+  int ret = sceVideodecInitLibrary(SCE_VIDEODEC_TYPE_HW_AVCDEC, &probe_init);
+  if (ret < 0) {
+    printf("%d reference frames: sceVideodecInitLibrary 0x%x\n", refs, ret);
+    return false;
+  }
+
+  bool ok = false;
+  SceAvcdecQueryDecoderInfo probe_info = {0};
+  probe_info.horizontal = horizontal;
+  probe_info.vertical = vertical;
+  probe_info.numOfRefFrames = refs;
+  SceAvcdecDecoderInfo probe_out = {0};
+  ret = sceAvcdecQueryDecoderMemSize(SCE_VIDEODEC_TYPE_HW_AVCDEC, &probe_info, &probe_out);
+  if (ret < 0) {
+    printf("%d reference frames: sceAvcdecQueryDecoderMemSize 0x%x\n", refs, ret);
+  } else {
+    // Rounded up to 1 MiB, as the real memblock is
+    *mem_size = (probe_out.frameMemSize + 0xFFFFF) & ~0xFFFFF;
+    if (capped && *mem_size > RFI_DECODER_MEM_LIMIT) {
+      printf("%d reference frames: decoder memblock %u KiB is over the %u KiB limit\n",
+             refs, (unsigned)(*mem_size / 1024), (unsigned)(RFI_DECODER_MEM_LIMIT / 1024));
+    } else {
+      SceUID block = sceKernelAllocMemBlock("decoder_probe", SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_NC_RW,
+                                            *mem_size, NULL);
+      if (block < 0) {
+        printf("%d reference frames: can't allocate %u KiB of PHYCONT, 0x%08x\n",
+               refs, (unsigned)(*mem_size / 1024), block);
+      } else {
+        SceAvcdecCtrl probe_ctrl = {0};
+        probe_ctrl.frameBuf.size = *mem_size;
+        ret = sceKernelGetMemBlockBase(block, &probe_ctrl.frameBuf.pBuf);
+        if (ret >= 0) {
+          ret = sceAvcdecCreateDecoder(SCE_VIDEODEC_TYPE_HW_AVCDEC, &probe_ctrl, &probe_info);
+          if (ret >= 0) {
+            sceAvcdecDeleteDecoder(&probe_ctrl);
+            ok = true;
+          } else {
+            printf("%d reference frames: sceAvcdecCreateDecoder 0x%x\n", refs, ret);
+          }
+        } else {
+          printf("%d reference frames: sceKernelGetMemBlockBase 0x%x\n", refs, ret);
+        }
+        sceKernelFreeMemBlock(block);
+      }
+    }
+  }
+
+  sceVideodecTermLibrary(SCE_VIDEODEC_TYPE_HW_AVCDEC);
+  return ok;
+}
+
+// How many reference frames to create the decoder with, and so to let the SPS keep
+static int vita_pick_ref_frames(unsigned horizontal, unsigned vertical, bool rfi) {
+  if (!rfi) {
+    return DEFAULT_REF_FRAMES;
+  }
+
+  int count = sizeof(RFI_REF_FRAME_CANDIDATES) / sizeof(RFI_REF_FRAME_CANDIDATES[0]);
+  for (int i = 0; i < count; i++) {
+    size_t mem_size;
+    int refs = RFI_REF_FRAME_CANDIDATES[i];
+    if (vita_probe_ref_frames(refs, refs > RFI_MIN_REF_FRAMES, horizontal, vertical, &mem_size)) {
+      printf("reference frame invalidation: decoder with %d reference frames, memblock %u KiB\n",
+             refs, (unsigned)(mem_size / 1024));
+      return refs;
+    }
+  }
+  // Not even RFI_MIN_REF_FRAMES, which is not capped, so the decoder can't hold what the host
+  // may use. The SPS then says fewer, and recovery after a loss can smear
+  printf("reference frame invalidation: no decoder with %d reference frames, using %d; "
+         "the host may use more, so recovery can smear\n", RFI_MIN_REF_FRAMES, DEFAULT_REF_FRAMES);
+  return DEFAULT_REF_FRAMES;
+}
+
 typedef struct {
   bool activated;
   uint8_t alpha;
@@ -358,6 +469,9 @@ static int vita_setup(int videoFormat, int width, int height, int redrawRate, vo
   __atomic_store_n(&keyframe_state, KEYFRAME_OK, __ATOMIC_RELEASE);
   stream_hint_start_us = 0;
   vitastats_reset();
+  decodes_without_output = 0;
+  worst_output_lag = 0;
+  recovery_output_pending = false;
   decode_yuv = config.decode_yuv;
   printf("video output: %s\n", decode_yuv ? "YUV420 (NV21), converted by the GPU" : "RGBA8888 from the decoder");
 
@@ -421,7 +535,14 @@ static int vita_setup(int videoFormat, int width, int height, int redrawRate, vo
     init->size = sizeof(SceVideodecQueryInitInfoHwAvcdec);
     init->horizontal = VITA_DECODER_RESOLUTION(width);
     init->vertical = VITA_DECODER_RESOLUTION(height);
-    init->numOfRefFrames = 4;
+    init->numOfRefFrames = vita_pick_ref_frames(init->horizontal, init->vertical,
+                                                config.enable_ref_frame_invalidation);
+    sps_ref_frames = config.enable_ref_frame_invalidation ? init->numOfRefFrames : 1;
+    sps_flags = GS_SPS_BITSTREAM_FIXUP;
+    if (config.enable_ref_frame_invalidation && config.rfi_min_dpb_hint) {
+      sps_flags |= GS_SPS_RFI_MIN_DPB_HINT;
+      printf("reference frame invalidation: telling the decoder its DPB is one frame (rfi_min_dpb_hint)\n");
+    }
     init->numOfStreams = 1;
 
     ret = sceVideodecInitLibrary(SCE_VIDEODEC_TYPE_HW_AVCDEC, init);
@@ -466,7 +587,7 @@ static int vita_setup(int videoFormat, int width, int height, int redrawRate, vo
 
     size_t sz = (decoder_info_out.frameMemSize + 0xFFFFF) & ~0xFFFFF;
     decoder->frameBuf.size = sz;
-    printf("allocating size 0x%x\n", sz);
+    printf("allocating size 0x%x (%u KiB) for %u reference frames\n", sz, (unsigned)(sz / 1024), decoder_info->numOfRefFrames);
 
     decoderblock = sceKernelAllocMemBlock("decoder", SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_NC_RW, sz, NULL);
     if (decoderblock < 0) {
@@ -599,7 +720,7 @@ static int vita_submit_decode_unit(PDECODE_UNIT decodeUnit) {
   uint32_t length = 0;
   while (entry != NULL) {
     if (entry->bufferType == BUFFER_TYPE_SPS) {
-      gs_sps_fix(entry, GS_SPS_BITSTREAM_FIXUP, decoder_buffer, &length);
+      gs_sps_fix(entry, sps_flags, decoder_buffer, &length, sps_ref_frames);
     } else {
       memcpy(decoder_buffer+length, entry->data, entry->length);
       length += entry->length;
@@ -642,7 +763,23 @@ static int vita_submit_decode_unit(PDECODE_UNIT decodeUnit) {
 
   if (array_picture.numOfOutput != 1) {
     //printf("numOfOutput %d\n", array_picture.numOfOutput);
+    // The decoder holds this picture back. Its output may come with a later unit, so
+    // carry the resume keyframe's flag to that
+    decodes_without_output++;
+    if (recovery_keyframe) {
+      recovery_output_pending = true;
+    }
     return DR_OK;
+  }
+  if (decodes_without_output > worst_output_lag) {
+    worst_output_lag = decodes_without_output;
+    vita_debug_log("decoder output lags input by %d frame(s) (ref frames %d)\n",
+                   decodes_without_output, sps_ref_frames);
+  }
+  decodes_without_output = 0;
+  if (recovery_output_pending) {
+    recovery_keyframe = true;
+    recovery_output_pending = false;
   }
 
   if (vitabench_active()) {
