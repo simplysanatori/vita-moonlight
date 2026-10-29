@@ -513,11 +513,11 @@ const setting_def SETTINGS[] = {
    .label = "Enable local audio", .is_on = local_audio_on, .change = local_audio_flip,
    .help = "Also plays the game's sound on your PC's speakers. Off keeps the PC quiet and sends "
       "the sound only to the Vita."},
-  {.tab = SETTINGS_TAB_STREAM, .kind = SETTING_CHOICE, .flags = SETTING_NEEDS_NEW_STREAM,
+  {.tab = SETTINGS_TAB_STREAM, .kind = SETTING_CHOICE, .flags = SETTING_NEEDS_NEW_STREAM | SETTING_CONFIRM_STEPS,
    .label = "Audio packet length", .value = audio_packet_value, .change = audio_packet_change,
    .help = "How much sound each Wi-Fi packet carries. 10 ms sends half as many audio packets, "
       "which can help on a crowded 2.4 GHz network, for 5 ms more audio delay. 5 ms has the "
-      "least delay. A host that doesn't support 10 ms keeps sending 5 ms, which still plays."},
+      "least delay. Older PCs that can't send 10 ms stay at 5 ms."},
 
   // System
   {.tab = SETTINGS_TAB_SYSTEM, .kind = SETTING_TOGGLE,

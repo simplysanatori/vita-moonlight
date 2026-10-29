@@ -24,6 +24,7 @@
 #include "gui/guilib.h"
 #include "gui/ui_connect.h"
 #include "session.h"
+#include "audio/vita.h"
 
 #include <enet/enet.h>
 #include <pthread.h>
@@ -800,7 +801,7 @@ static void write_report(FILE *f, const char *started, const char *host, const c
              "\"packet_size\": %d, \"audio_packet_ms\": %d, \"direct_decode\": %s, \"input_sync\": %s, \"boost_clocks\": %s, "
              "\"frame_pacer\": %s, \"vblank_wait\": %s, \"stats_overlay\": %d, \"debug_log\": %s, \"decode_yuv\": %s},\n",
           config.stream.width, config.stream.height, config.stream.fps, config.stream.bitrate,
-          config.stream.packetSize, config.audio_packet_ms, config.direct_decode ? "true" : "false",
+          config.stream.packetSize, vitaaudio_packet_ms(), config.direct_decode ? "true" : "false",
           config.input_sync_to_controller ? "true" : "false", config.boost_clocks ? "true" : "false",
           config.enable_frame_pacer ? "true" : "false", config.enable_vita_vblank_wait ? "true" : "false",
           config.stats_overlay, config.save_debug_log ? "true" : "false", config.decode_yuv ? "true" : "false");

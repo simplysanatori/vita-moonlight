@@ -40,8 +40,8 @@ enum {
 #define BUFFER_COUNT 3
 
 // The longest Opus frame is 60 ms (2880 samples at 48 kHz). Packets are decoded
-// into a scratch frame of this size, so whatever duration the host sends plays,
-// even when it isn't the one asked for.
+// into a scratch frame of this size, so any packet up to 60 ms plays, even when
+// it isn't the duration asked for.
 #define MAX_FRAME_SAMPLES 2880
 // Smallest Opus frame at 48 kHz, 2.5 ms; every frame is a multiple of it
 #define MIN_FRAME_SAMPLES 120
@@ -63,12 +63,16 @@ static OpusMSDecoder* decoder = NULL;
 // so fill the next one in the ring. The hardware wants them 64-byte aligned,
 // and the size is a multiple of 64 so every buffer in the array is.
 static short buffers[BUFFER_COUNT][BUFFER_SIZE] __attribute__((aligned(64)));
-_Static_assert(BUFFER_SIZE * sizeof(short) % 64 == 0, "audio buffers must stay 64-byte aligned");
+_Static_assert(sizeof(buffers[0]) % 64 == 0, "audio buffers must stay 64-byte aligned");
 static int buffer_index;
 
 // Samples in the last frame decoded, which is how much concealment fills in for
 // a lost packet. It starts at the negotiated packet duration (240 for 5 ms).
 static int last_frame_samples = 240;
+// Samples per packet common-c negotiated with the host. Kept after cleanup so
+// the benchmark report can read it once the stream has ended.
+static int negotiated_samples = 0;
+static bool duration_mismatch_logged;
 // One decoded frame, before it's copied into the output buffer
 static short frame_pcm[2 * MAX_FRAME_SAMPLES];
 static bool decode_thread_logged = false;
@@ -115,7 +119,10 @@ static int vita_renderer_init(int audioConfiguration, POPUS_MULTISTREAM_CONFIGUR
     return VITA_AUDIO_ERROR_BAD_OPUS;
   }
   last_frame_samples = frame_samples;
-  vita_debug_log("audio: %d ms packets\n", frame_samples / 48);
+  negotiated_samples = frame_samples;
+  duration_mismatch_logged = false;
+  vita_debug_log("audio: %d-sample packets (%d.%d ms)\n", frame_samples,
+                 frame_samples / 48, (frame_samples % 48) * 10 / 48);
 
   decode_offset = 0;
   buffer_index = 0;
@@ -151,7 +158,10 @@ static int vita_renderer_init(int audioConfiguration, POPUS_MULTISTREAM_CONFIGUR
   return VITA_AUDIO_INIT_OK;
 }
 
-static bool vita_renderer_should_drop() {
+// Placeholders for lost packets take part too, so a backlog that starts with
+// them is thrown away and the end of a catch-up is noticed on them, but only
+// real packets are counted as dropped
+static bool vita_renderer_should_drop(bool lost) {
   int pending = LiGetPendingAudioDuration();
 
   if (!catching_up) {
@@ -166,9 +176,11 @@ static bool vita_renderer_should_drop() {
     return false;
   }
 
-  catch_up_dropped++;
-  // Read by the stats thread
-  __atomic_fetch_add(&dropped_packets, 1, __ATOMIC_RELAXED);
+  if (!lost) {
+    catch_up_dropped++;
+    // Read by the stats thread
+    __atomic_fetch_add(&dropped_packets, 1, __ATOMIC_RELAXED);
+  }
   return true;
 }
 
@@ -209,32 +221,40 @@ static void vita_renderer_decode_and_play_sample(char* data, int length) {
   }
 
   bool lost = data == NULL || length <= 0;
-  int decodeLen;
-  if (lost) {
-    // A backlog is being thrown away, so there's nothing to conceal; the gap
-    // is already inside what's dropped
-    if (catching_up)
-      return;
+  // A backlog is thrown away whole, lost packets included: there's nothing to
+  // conceal inside audio that won't be played
+  if (vita_renderer_should_drop(lost))
+    return;
+
+  int decodeLen = 0;
+  if (!lost) {
+    // Room for the longest frame, so a packet of any duration decodes
+    decodeLen = opus_multistream_decode(decoder, (const unsigned char*)data, length, frame_pcm, MAX_FRAME_SAMPLES, 0);
+    if (decodeLen > 0) {
+      if (decodeLen != negotiated_samples && !duration_mismatch_logged) {
+        // Still plays, but the pending-audio thresholds assume the negotiated length
+        vita_debug_log("audio: host sends %d samples a packet, %d negotiated\n", decodeLen, negotiated_samples);
+        duration_mismatch_logged = true;
+      }
+      last_frame_samples = decodeLen;
+    } else {
+      vita_debug_log("Opus error from decode: %d, concealing\n", decodeLen);
+    }
+  }
+
+  if (lost || decodeLen <= 0) {
     // Opus extrapolates from what it last played. Opus in-band FEC (decode_fec)
     // would need the next packet's data, which this callback doesn't have yet;
     // the host's recovery is the Reed-Solomon FEC in common-c, already spent.
     decodeLen = opus_multistream_decode(decoder, NULL, 0, frame_pcm, last_frame_samples, 0);
     if (decodeLen > 0)
       concealed_packets++;
-  } else {
-    if (vita_renderer_should_drop())
-      return;
-    // Room for the longest frame, so a packet of any duration decodes
-    decodeLen = opus_multistream_decode(decoder, (const unsigned char*)data, length, frame_pcm, MAX_FRAME_SAMPLES, 0);
-    if (decodeLen > 0)
-      last_frame_samples = decodeLen;
+    else
+      vita_debug_log("Opus error from concealment: %d\n", decodeLen);
   }
 
-  if (decodeLen > 0) {
+  if (decodeLen > 0)
     vita_renderer_queue_samples(frame_pcm, decodeLen);
-  } else {
-    vita_debug_log("Opus error from %s: %d\n", lost ? "concealment" : "decode", decodeLen);
-  }
 }
 
 AUDIO_RENDERER_CALLBACKS audio_callbacks_vita = {
@@ -244,6 +264,10 @@ AUDIO_RENDERER_CALLBACKS audio_callbacks_vita = {
   .capabilities = 0,
 };
 
+
+int vitaaudio_packet_ms() {
+  return negotiated_samples / 48;
+}
 
 void vitaaudio_set_packet_ms(int ms) {
   // common-c asks the host for 10 ms packets when the renderer says it's a
